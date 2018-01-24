@@ -80,12 +80,28 @@
        [:commandlog {:enabled true, :synchronous true, :logsize 128}
         [:frequency {:time 2}]]]))) ; milliseconds
 
+(defn init-voltdb!
+  "Starts the daemon with the given command."
+  [test host]
+  (info host "initializing voltdbroot")
+  (c/sudo username
+          (c/cd voltroot
+                (c/exec (str base-dir "/bin/voltdb") :init
+                    :--config (str base-dir "/deployment.xml")
+                    :--force
+                    :--dir (str base-dir)
+                    (c/lit ">> log/stdout.log")
+                ))))
+
 (defn configure!
   "Prepares config files and creates fresh DB."
   [test node]
   (c/sudo username
         (c/cd base-dir
-              (c/exec :echo (deployment-xml test) :> "deployment.xml"))))
+              (c/exec :echo (deployment-xml test) :> "deployment.xml")))
+
+  (init-voltdb! (jepsen/primary test))
+)
 
 (defn close!
   "Calls c.close"
@@ -112,50 +128,33 @@
   [test]
   (remove nil? (pmap up? (:nodes test))))
 
-(defn await-initialization
-  "Blocks until the logfile reports 'Server completed initialization'."
-  [node]
-  (info "Waiting for" node "to initialize at voltroot:" voltroot)
-  (def done 0)
-  (timeout 120000
-        (throw (RuntimeException.
-                    (str node " failed to initialize in time; STDOUT:\n\n"
-                         (meh (c/exec :tail :-n 10
-                                      (str base-dir "/log/stdout.log")))
-                         "\n\nLOG:\n\n"
-                         (meh (c/exec :tail :-n 10
-                                      (str voltroot "/log/volt.log")))
-                         "\n\n")))
-        (loop [x 100]
-        (info node " NOT initializd, " x "attempts left")
-        (try
-
-            (c/sudo username
-                   (c/cd voltroot
-                         (Thread/sleep 2000)
-                         (c/exec :tail :-n 1 :-f "log/volt.log"
-                                 | :grep :-m 1 "Initialized VoltDB root directory"
-                                 | :xargs (c/lit "echo \"\" >> log/volt.log \\;")))
-                   (info node "initializd " x)
-                   ( def done 1 )
-            )
-            (catch RuntimeException e (info node "waiting for init" ))
-	    )
-
-	    (when (and (> x 0 ) (= done 0))
-			(recur (dec x)))
-		)
-
-   )
-)
-
 (defn await-start
     "Blocks until the logfile reports 'Server completed initialization'."
   [node]
   (info "Waiting for" node "to start at voltroot:" voltroot )
   (def done false)
-  (timeout 120000
-       (throw (RuntimeException.
+
+       (loop [x 50]
+       (try
+           (c/sudo username
+                   (c/cd voltroot
+
+                         (Thread/sleep 5000)
+                         (info node (c/exec :tail :-n 5 "log/volt.log"))
+                         (c/exec :tail :-n 5 "log/volt.log"
+                                 | :grep :-m 1 :-E "completed initialization|Node rejoin completed"
+                                 )))
+
+                   (info node "started")
+                   (def done true )
+	       (catch Exception e (info node "waiting for startup " x " retries left" ) )
+       )
+
+       (when (and (not done) (> x 0))
+            (recur (dec x)))
+       )
+       (when (not done)
+            (throw (RuntimeException.
                     (str node " failed to start in time; STDOUT:\n\n"
                         (meh (c/exec :tail :-n 10
                                       (str base-dir "/log/stdout.log")))
@@ -163,39 +162,16 @@
                          (meh (c/exec :tail :-n 10
                                       (str voltroot "/log/volt.log")))
                          "\n\n")))
-
-       (loop [x 100]
-       (info node " NOT started, " x "attempts left")
-
-       (try
-           (c/sudo username
-                   (c/cd voltroot
-
-                         (Thread/sleep 2000)
-                         (c/exec :tail :-n 1 :-f "log/volt.log"
-                                 | :grep :-m 1 :-E "completed initialization|Node rejoin completed"
-                                 | :xargs (c/lit "echo \"\" >> log/volt.log \\;")))
-
-                   (info node "started")
-                   ( def done true )
-	       )
-	       (catch RuntimeException e (info node "waiting for startup" ) )
-       )
-
-       (when (and (> x 0 ) (not done))
-            (info node "waiting for startup 2" )
-            (recur (dec x)))
-       )
-
-   )
+        )
    "done"
 )
+
 (defn await-rejoin
   "Blocks until the logfile reports 'Node rejoin completed'"
   [node]
   (info "Waiting for" node "to rejoin")
   (def done 0)
-  (timeout 120000
+  (timeout 240000
            (throw (RuntimeException.
                     (str node " failed to rejoin in time; STDOUT:\n\n"
                         (meh (c/exec :tail :-n 10
@@ -230,19 +206,6 @@
 
 
 
-(defn init-daemon!
-  "Starts the daemon with the given command."
-  [test cmd host]
-  (c/sudo username
-          (c/cd voltroot
-                (cu/start-daemon! {:logfile (str base-dir "/log/stdout.log")
-                                   :pidfile (str base-dir "/pidfile")
-                                   :chdir   base-dir}
-                                  (str base-dir "/bin/voltdb")
-                                  (str "init")
-                                  :--config (str base-dir "/deployment.xml")
-                                  :--force
-                                  :--dir (str base-dir) ))))
 (defn start-daemon!
   "Starts the daemon with the given command."
   [test cmd host]
@@ -260,8 +223,6 @@
 (defn start!
   "Starts voltdb, creating a fresh DB"
   [test node]
-  (init-daemon! test :init (jepsen/primary test))
-  (await-initialization node)
   (start-daemon! test :start (jepsen/primary test))
   (await-start node))
 
