@@ -20,6 +20,7 @@
                     [util         :as util]
                     [tests        :as tests]]
             [jepsen.os.debian     :as debian]
+            [jepsen.checker.timeline :as timeline]
             [jepsen.voltdb        :as voltdb]
             [knossos.model        :as model]
             [knossos.op           :as op]
@@ -176,6 +177,7 @@
            :model   (model/cas-register 0)
            :checker (checker/compose
                       {:dirty-reads (checker)
+                       :timeline (timeline/html)
                        :perf   (checker/perf)})
            :nemesis (voltdb/general-nemesis)
            :concurrency 15
