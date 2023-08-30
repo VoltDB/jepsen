@@ -12,6 +12,7 @@
             [jepsen.os.debian       :as debian]
             [jepsen.checker.timeline :as timeline]
             [jepsen.voltdb          :as voltdb]
+            [jepsen.voltdb [client :as vc]]
             [knossos.model          :as model]
             [knossos.op             :as op]
             [clojure.string         :as str]
@@ -32,85 +33,88 @@
       :system-count                 How many systems to preallocate
       :procedure-call-timeout       How long in ms to wait for proc calls
       :connection-response-timeout  How long in ms to wait for connections"
-  ([opts] (client nil opts))
-  ([conn opts]
-   (let [initialized? (promise)]
-     (reify client/Client
-       (setup! [_ test node]
-         (let [conn (voltdb/connect
-                      node (select-keys opts
-                                        [:procedure-call-timeout
-                                         :connection-response-timeout]))]
-           (when (deliver initialized? true)
-             (try
-               (c/on node
-                     ; Create table
-                     (voltdb/sql-cmd! "CREATE TABLE multi (
-                                      system      INTEGER NOT NULL,
-                                      key         VARCHAR NOT NULL,
-                                      value       INTEGER NOT NULL,
-                                      PRIMARY KEY (system, key)
-                                      );
-                                      PARTITION TABLE multi ON COLUMN key;")
-                     (voltdb/sql-cmd! "CREATE PROCEDURE FROM CLASS
-                                      jepsen.procedures.MultiTxn;")
-                     (info node "table created")
-                     ; Create initial systems
-                     (dotimes [i (:system-count opts)]
-                       (doseq [k (:keys opts)]
-                         (voltdb/call! conn "MULTI.insert" i (name k) 0)))
-                     (info node "initial state populated"))
-               (catch RuntimeException e
-                 (voltdb/close! conn)
-                 (throw e))))
-           (client conn opts)))
+  ([opts] (client nil (promise) opts nil))
+  ([node initialized? opts conn]
+   (reify client/Client
+     (open! [_ test node]
+       (let [conn (vc/connect
+                    node (select-keys opts
+                                      [:procedure-call-timeout
+                                       :connection-response-timeout]))]
+         (client node initialized? opts conn)))
 
-       (invoke! [this test op]
-         (try
-           (case (:f op)
-             :txn (let [[system txn] (:value op)
-                        fs (->> txn
-                                (map first)
-                                (map name)
-                                (into-array String))
-                        ks (->> txn
-                                (map second)
-                                (map name)
-                                (into-array String))
-                        vs (->> txn
-                                (map #(or (nth % 2) -1)) ; gotta pick an int
-                                (into-array Integer/TYPE))
-                        res (-> conn
-                                (voltdb/call! "MultiTxn" system fs ks vs))
-                        ; Map results of reads back into read values
-                        txn' (mapv (fn [[f k v :as op] table]
-                                     (case f
-                                       :write op
-                                       :read  (->> table :rows first :VALUE
-                                                  (assoc op 2))))
-                                   txn
-                                   res)]
-                    (assoc op
-                           :type :ok
-                           :value (independent/tuple system txn'))))
-           (catch org.voltdb.client.NoConnectionsException e
-             (assoc op :type :fail, :error :no-conns))
-           (catch org.voltdb.client.ProcCallException e
-             (let [type (if (read-only? (val (:value op))) :fail :info)]
-               (condp re-find (.getMessage e)
-                 #"^No response received in the allotted time"
-                 (assoc op :type type, :error :timeout)
+     (setup! [_ test]
+       (when (deliver initialized? true)
+         (c/on node
+               (vc/with-race-retry
+                 ; Create table
+                 (voltdb/sql-cmd! "CREATE TABLE multi (
+                                  system      INTEGER NOT NULL,
+                                  key         VARCHAR NOT NULL,
+                                  value       INTEGER NOT NULL,
+                                  PRIMARY KEY (system, key)
+                                  );
+                                  PARTITION TABLE multi ON COLUMN key;")
+                 (voltdb/sql-cmd! "CREATE PROCEDURE FROM CLASS
+                                  jepsen.procedures.MultiTxn;")
+                 (info node "table created")
+                 ; Create initial systems
+                 (dotimes [i (:system-count opts)]
+                   (doseq [k (:keys opts)]
+                     (vc/call! conn "MULTI.insert" i (name k) 0)))))
+         (info node "initial state populated")))
 
-                 #"^Connection to database host .+ was lost before a response"
-                 (assoc op :type type, :error :conn-lost)
+     (invoke! [this test op]
+     ; {:type :invoke, :f :txn, :value [0 [[:read 1 nil] [:write 2 3]]]}
+       (try
+         (case (:f op)
+           :txn (let [[system txn] (:value op)
+                      fs (->> txn
+                              (map first)
+                              (map name)
+                              (into-array String))
+                      ks (->> txn
+                              (map second)
+                              (map name)
+                              (into-array String))
+                      vs (->> txn
+                              (map #(or (nth % 2) -1)) ; gotta pick an int
+                              (into-array Integer/TYPE))
+                      res (-> conn
+                              (vc/call! "MultiTxn" system fs ks vs))
+                      ; Map results of reads back into read values
+                      txn' (mapv (fn [[f k v :as op] table]
+                                   (case f
+                                     :write op
+                                     :read  (->> table :rows first :VALUE
+                                                 (assoc op 2))))
+                                 txn
+                                 res)]
+                  (assoc op
+                         :type :ok
+                         :value (independent/tuple system txn'))))    
+         ; {:type :ok, :f :txn, :value [0 [[:read 1 4] [:write 2 3]]]}
 
-                 #"^Transaction dropped due to change in mastership"
-                 (assoc op :type type, :error :mastership-change)
+         (catch org.voltdb.client.NoConnectionsException e
+           (assoc op :type :fail, :error :no-conns))
+         (catch org.voltdb.client.ProcCallException e
+           (let [type (if (read-only? (val (:value op))) :fail :info)]
+             (condp re-find (.getMessage e)
+               #"^No response received in the allotted time"
+               (assoc op :type type, :error :timeout)
 
-                 (throw e))))))
+               #"^Connection to database host .+ was lost before a response"
+               (assoc op :type type, :error :conn-lost)
 
-       (teardown! [_ test]
-         (voltdb/close! conn))))))
+               #"^Transaction dropped due to change in mastership"
+               (assoc op :type type, :error :mastership-change)
+
+               (throw e))))))
+
+     (teardown! [_ test])
+
+     (close! [_ test]
+       (vc/close! conn)))))
 
 (defn op
   "An op is a tuple of [f k v] like [:read 0 nil], or [:write 2 3]"
@@ -149,41 +153,33 @@
      :f     :txn
      :value (mapv (fn [k] [:read k nil]) ks)}))
 
-(defn multi-test
-  "Special options, in addition to voltdb/base-test:
+(defn workload
+  "Takes CLI options and constructs a workload map. Special options:
 
-      :time-limit                   How long should we run the test for?
       :procedure-call-timeout       How long in ms to wait for proc calls
       :connection-response-timeout  How long in ms to wait for connections"
   [opts]
-  (let [ks [:x :y]
-        system-count 1000]
-    (voltdb/base-test
-      (assoc opts
-             :name    "voltdb multi"
-             :client  (client (merge
-                                {:keys         ks
-                                 :system-count system-count}
-                                (select-keys opts
-                                             [:keys
-                                              :system-count
-                                              :procedure-call-timeout
-                                              :connection-response-timeout])))
-             :model   (model/multi-register (zipmap ks (repeat 0)))
-             :checker (checker/compose
-                        {:linear   (independent/checker checker/linearizable)
-                         :timeline (independent/checker (timeline/html))
-                         :perf     (checker/perf)})
-             :nemesis (voltdb/general-nemesis)
-             :recovery-delay (:recovery-delay opts 30)
-             :concurrency 100
-             :generator (->> (independent/concurrent-generator
-                               10
-                               (range)
-                               (fn [id]
-                                 (->> (txn-gen ks)
-                                      (gen/stagger 5)
-                                      (gen/reserve 5 (read-only-txn-gen ks))
-                                      (gen/stagger 1)
-                                      (gen/time-limit 120))))
-                             (voltdb/general-gen opts))))))
+  (let [ks           [:x :y]
+        system-count 1000
+        n            (count (:nodes opts))]
+    {:client  (client (merge
+                        {:keys         ks
+                         :system-count system-count}
+                        (select-keys opts
+                                     [:keys
+                                      :system-count
+                                      :procedure-call-timeout
+                                      :connection-response-timeout])))
+     :checker (checker/compose
+                {:linear   (independent/checker
+                             (checker/linearizable
+                               {:model (model/multi-register
+                                         (zipmap ks (repeat 0)))}))
+                 :timeline (independent/checker (timeline/html))})
+     :generator (independent/concurrent-generator
+                  (* 2 n)
+                  (range)
+                  (fn per-key [id]
+                    (->> (txn-gen ks)
+                         (gen/reserve n (read-only-txn-gen ks))
+                         (gen/limit 150))))}))

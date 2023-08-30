@@ -19,8 +19,10 @@
                     [os           :as os]
                     [util         :as util]
                     [tests        :as tests]]
+            [jepsen.generator.context :as gen.context]
             [jepsen.os.debian     :as debian]
             [jepsen.voltdb        :as voltdb]
+            [jepsen.voltdb [client :as vc]]
             [knossos.model        :as model]
             [knossos.op           :as op]
             [clojure.string       :as str]
@@ -30,65 +32,69 @@
 
 (defn client
   "A single-register client."
-  ([opts] (client opts nil nil))
-  ([opts node conn]
-   (let [initialized? (promise)]
-     (reify client/Client
-       (setup! [_ test node]
-         (let [conn (voltdb/connect
-                      node
-                      (select-keys opts
-                                   [:procedure-call-timeout
-                                    :connection-response-timeout]))]
-           (c/on node
-                 (when (deliver initialized? true)
-                   ; Create table
-                   (voltdb/sql-cmd! "CREATE TABLE dirty_reads (
-                                      id          INTEGER NOT NULL,
-                                      PRIMARY KEY (id)
-                                    );
-                                    PARTITION TABLE dirty_reads ON COLUMN id;")
-                   (voltdb/sql-cmd! "CREATE PROCEDURE FROM CLASS
-                                    jepsen.procedures.DirtyReadStrongRead;")
-                   (info node "table created")))
-           (client opts node conn)))
+  ([opts] (client opts (promise) nil nil))
+  ([opts initialized? node conn]
+   (reify client/Client
+     (open! [_ test node]
+       (let [conn (vc/connect
+                    node
+                    (select-keys opts
+                                 [:procedure-call-timeout
+                                  :connection-response-timeout]))]
+         (client opts initialized? node conn)))
 
-       (invoke! [this test op]
-         (try
-           (case (:f op)
-             ; Race conditions ahoy, awful hack
-             :rejoin (if (voltdb/up? node)
-                       (assoc op :type :ok, :value :already-up)
-                       (do (c/on node (voltdb/rejoin! test node))
-                           (assoc op :type :ok, :value :rejoined)))
+     (setup! [_ test]
+       (when (deliver initialized? true)
+         (c/on node
+               ; Create table
+               (vc/with-race-retry
+                 (voltdb/sql-cmd! "CREATE TABLE dirty_reads (
+                                  id          INTEGER NOT NULL,
+                                  PRIMARY KEY (id)
+                                  );
+                                  PARTITION TABLE dirty_reads ON COLUMN id;")
+                 (voltdb/sql-cmd! "CREATE PROCEDURE FROM CLASS
+                                  jepsen.procedures.DirtyReadStrongRead;")))
+         (info node "table created")))
 
-             :read (let [v (->> (:value op)
-                                (voltdb/call! conn "DIRTY_READS.select")
-                                first
-                                :rows
-                                (map :ID)
-                                first)]
-                        (assoc op :type (if v :ok :fail), :value v))
+     (invoke! [this test op]
+       (try
+         (case (:f op)
+           ; Race conditions ahoy, awful hack
+           :rejoin (if (vc/up? node)
+                     (assoc op :type :ok, :value :already-up)
+                     (do (c/on node (voltdb/rejoin! test node))
+                         (assoc op :type :ok, :value :rejoined)))
 
-             :write (do (voltdb/call! conn "DIRTY_READS.insert" (:value op))
-                        (assoc op :type :ok))
+           :read (let [v (->> (:value op)
+                              (vc/call! conn "DIRTY_READS.select")
+                              first
+                              :rows
+                              (map :ID)
+                              first)]
+                   (assoc op :type (if v :ok :fail), :value v))
 
-             :strong-read (->> (voltdb/call! conn "DirtyReadStrongRead")
-                               first
-                               :rows
-                               (map :ID)
-                               (into (sorted-set))
-                               (assoc op :type :ok, :value)))
-           (catch org.voltdb.client.NoConnectionsException e
-             ; It'll take a few seconds to come back, might as well take a
-             ; breather
-             (Thread/sleep 1000)
-             (assoc op :type :fail, :error :no-conns))
-           (catch org.voltdb.client.ProcCallException e
-             (assoc op :type :info, :error (.getMessage e)))))
+           :write (do (vc/call! conn "DIRTY_READS.insert" (:value op))
+                      (assoc op :type :ok))
 
-       (teardown! [_ test]
-         (voltdb/close! conn))))))
+           :strong-read (->> (vc/call! conn "DirtyReadStrongRead")
+                             first
+                             :rows
+                             (map :ID)
+                             (into (sorted-set))
+                             (assoc op :type :ok, :value)))
+         (catch org.voltdb.client.NoConnectionsException e
+           ; It'll take a few seconds to come back, might as well take a
+           ; breather
+           (Thread/sleep 1000)
+           (assoc op :type :fail, :error :no-conns))
+         (catch org.voltdb.client.ProcCallException e
+           (assoc op :type :info, :error (.getMessage e)))))
+
+     (teardown! [_ test])
+
+     (close! [_ test]
+       (vc/close! conn)))))
 
 (defn checker
   "Verifies that we never read an element from a transaction which did not
@@ -97,7 +103,7 @@
   Also verifies that every successful write is present in the strong read set."
   []
   (reify checker/Checker
-    (check [checker test model history opts]
+    (check [checker test history opts]
       (let [ok    (filter op/ok? history)
             writes (->> ok
                         (filter #(= :write (:f %)))
@@ -130,58 +136,46 @@
          :lost-count        (count lost)
          :lost              lost}))))
 
-(defn sr  [_ _] {:type :invoke, :f :strong-read, :value nil})
+(defrecord RWGen
+  [last-write ; The value we wrote last
+   in-flight] ; A vector of in-flight writes on each node; initally nil
+  gen/Generator
+  (update [this test context event]
+    this)
+
+  (op [this test context]
+    (let [; Lazy initialization of in-flight vector once test is ready
+          in-flight (or in-flight (vec (repeat (count (:nodes test)) 0)))
+          ; Pick a free process
+          process (gen.context/some-free-process context)]
+      (if (nil? process)
+        [:pending this]
+        (let [thread  (gen.context/process->thread context process)
+              ; What number node is that?
+              n (mod process (count (:nodes test)))]
+          (if (= thread n)
+            ; The first node-count processes perform writes
+            (let [last-write' (inc last-write)
+                  in-flight'  (assoc in-flight n last-write')]
+              [(gen/fill-in-op {:f :write, :value last-write'} context)
+               (RWGen. last-write' in-flight')])
+            ; Remaining processes try to read most recent writes
+            [(gen/fill-in-op {:f :read, :value (nth in-flight n)} context)
+             this]))))))
 
 (defn rw-gen
   "While one process writes to a node, we want another process to see that the
   in-flight write is visible, in the instant before the node crashes."
   []
-  (let [; What did we write last?
-        write (atom -1)
-        ; A vector of in-flight writes on each node.
-        in-flight (atom nil)]
-    (reify gen/Generator
-      (op [_ test process]
-        ; lazy init of in-flight state
-        (when-not @in-flight
-          (compare-and-set! in-flight
-                            nil
-                            (vec (repeat (count (:nodes test)) 0))))
+  (RWGen. -1 nil))
 
-        (let [; thread index
-              t (gen/process->thread test process)
-              ; node index
-              n (mod process (count (:nodes test)))]
-          (if (= t n)
-            ; The first n processes perform writes
-            (let [v (swap! write inc)]
-              ; Record the in-progress write
-              (swap! in-flight assoc n v)
-              {:type :invoke, :f :write, :value v})
+(defn workload
+  "Takes CLI options and constructs a workload map. Special options:
 
-            ; Remaining processes try to read the most recent write
-            {:type :invoke, :f :read, :value (nth @in-flight n)}))))))
-
-(defn dirty-read-test
-  "Takes an options map. Special options, in addition to voltdb/base-test:
-
-  :procedure-call-timeout       How long in ms to wait for proc calls
-  :connection-response-timeout  How long in ms to wait for connections
-  :time-limit                   How long to run test for, in seconds"
+      :procedure-call-timeout       How long in ms to wait for proc calls
+      :connection-response-timeout  How long in ms to wait for connections"
   [opts]
-  (voltdb/base-test
-    (assoc opts
-           :name    "voltdb dirty-read"
-           :client  (client opts)
-           :model   (model/cas-register 0)
-           :checker (checker/compose
-                      {:dirty-reads (checker)
-                       :perf   (checker/perf)})
-           :nemesis (voltdb/general-nemesis)
-           :concurrency 15
-           :generator (gen/phases
-                        (->> (rw-gen)
-                             (gen/stagger 1/100)
-                             (voltdb/general-gen opts))
-                        (voltdb/final-recovery)
-                        (gen/clients (gen/each (gen/once sr)))))))
+  {:client          (client opts)
+   :checker         (checker)
+   :generator       (rw-gen)
+   :final-generator (gen/each-thread {:f :strong-read})})

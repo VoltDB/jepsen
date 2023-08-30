@@ -1,75 +1,89 @@
 (ns jepsen.voltdb.runner
-  "Runs VoltDB tests. Provides exit status reporting."
+  "Runs VoltDB tests from the command line."
   (:gen-class)
   (:require [clojure.pprint :refer [pprint]]
-            [clojure.tools.cli :as cli]
             [clojure.tools.logging :refer :all]
             [clojure.string :as str]
             [clojure.java.io :as io]
-            [jepsen.core :as jepsen]
+            [jepsen [core :as jepsen]
+                    [checker :as checker]
+                    [cli :as cli]
+                    [generator :as gen]
+                    [os :as os]
+                    [tests :as tests]]
+            [jepsen.checker.timeline :as timeline]
+            [jepsen.os.debian :as debian]
             [jepsen.voltdb :as voltdb]
             [jepsen.voltdb [dirty-read :as dirty-read]
+                           [export     :as export]
                            [multi      :as multi]
-                           [single     :as single]]))
+                           [nemesis    :as nemesis]
+                           [single     :as single]
+                           [redundant-register :as redundant-register]]))
 
-(defn one-of
-  "Takes a collection and returns a string like \"Must be one of ...\" and a
-  list of names. For maps, uses keys."
-  [coll]
-  (str "Must be one of "
-       (pr-str (sort (map name (if (map? coll) (keys coll) coll))))))
+(def workloads
+  "A map of workload names names to functions that take CLI options and return
+  workload maps"
+  {:dirty-read         dirty-read/workload
+   :export             export/workload
+   :multi              multi/workload
+   :redundant-register redundant-register/workload
+   :single             single/workload})
 
-(def tests
-  "A map of test names to test constructors."
-  {"multi"       multi/multi-test
-   "single"      single/single-test
-   "dirty-read"  dirty-read/dirty-read-test})
+(def nemeses
+  "All nemesis faults we know about."
+  ; TODO: add bitflip/truncate
+  #{:partition :clock :pause :kill :rando})
 
-(def default-hosts [:n1 :n2 :n3 :n4 :n5])
+(def special-nemeses
+  "A map of special nemesis names to collections of faults."
+  {:none []
+   :all  [:partition :clock]})
 
-(def optspec
+(def all-nemeses
+  "Combinations of nemeses we run through for test-all"
+  [[]
+   [:rando :kill]
+   [:rando :partition]
+   [:rando :pause]
+   [:rando :clock]
+   [:rando :kill :partition]])
+
+(defn parse-nemesis-spec
+  "Takes a comma-separated nemesis string and returns a collection of keyword
+  faults."
+  [spec]
+  (->> (str/split spec #",")
+       (map keyword)
+       (mapcat #(get special-nemeses % [%]))))
+
+(def opt-spec
   "Command line options for tools.cli"
-  [["-h" "--help" "Print out this message and exit"]
+  [[nil "--concurrency NUMBER" "How many workers should we run? Must be an integer, optionally followed by n (e.g. 3n) to multiply by the number of nodes."
+    :default  "4n"
+    :validate [(partial re-find #"^\d+n?$")
+               "Must be an integer, optionally followed by n."]]
 
-   ["-n" "--node HOSTNAME" "Node(s) to run test on"
-    :default default-hosts
-    :assoc-fn (fn [m k v] (if (identical? (get m k) default-hosts)
-                            (assoc m k [v]) ; Replace with given host
-                            (update m k conj v)))]
+   [nil "--force-download" "Re-download tarballs, even if cached locally"]
 
-   ["-t" "--time-limit SECONDS"
-    "Excluding setup and teardown, how long should a test run for, in seconds?"
-    :default  150
-    :parse-fn #(Long/parseLong %)
-    :validate [pos? "Must be positive"]]
+   ["-l" "--license FILE" "Path to the VoltDB license file on the control node"
+    :default "license.xml"]
 
-   [nil "--recovery-delay SECONDS"
-    "How long should we wait before killing nodes and recovering?"
-    :default 0
-    :parse-fn #(Long/parseLong %)
-    :validate [pos? "Must be positive"]]
+   [nil "--nemesis FAULTS" "A comma-separated list of faults to inject."
+    :parse-fn parse-nemesis-spec
+    :validate [(partial every? (fn [nem]
+                                 (or (nemeses nem)
+                                     (special-nemeses nem))))
+               (cli/one-of (concat nemeses (keys special-nemeses)))]]
 
-   ["-c" "--test-count NUMBER"
-    "How many times should we repeat a test?"
-    :default  1
-    :parse-fn #(Long/parseLong %)
-    :validate [pos? "Must be positive"]]
+   [nil "--nemesis-interval SECONDS" "How long between nemesis operations, on average, for each class of fault?"
+    ; In my testing, Volt often takes 20 seconds or so just to start up--we
+    ; don't want to go too fast here.
+    :default  30
+    :parse-fn read-string
+    :validate [pos? "must be positive"]]
 
    [nil "--no-reads" "Disable reads, to test write safety only"]
-
-   [nil "--strong-reads" "Use stored procedure including a write for all reads"]
-
-   [nil "--skip-os" "Don't perform OS setup"]
-
-   [nil "--force-download" "Always download HTTP/S tarballs"]
-
-   [nil "--username USER" "Username for logins"
-    :default "root"
-    :assoc-fn (fn [m k v] (assoc-in m [:ssh k] v))]
-
-   [nil "--password PASS" "Password for sudo access"
-    :default "root"
-    :assoc-fn (fn [m k v] (assoc-in m [:ssh k] v))]
 
    ["-p" "--procedure-call-timeout MILLISECONDS"
     "How long should we wait before timing out procedure calls?"
@@ -77,112 +91,97 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
-   ["-u" "--tarball URL" "URL for the Mongo tarball to install. May be either HTTP, HTTPS, or a local file. For instance, --tarball https://foo.com/mongo.tgz, or file:///tmp/mongo.tgz"
+   ["-r" "--rate HZ" "Approximate number of requests per second, total"
+    :default 100
+    :parse-fn read-string
+    :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
+
+   [nil "--recovery-delay SECONDS"
+    "How long should we wait before killing nodes and recovering?"
+    :default 0
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--strong-reads" "Use stored procedure including a write for all reads"]
+
+   [nil "--skip-os" "Don't perform OS setup"]
+
+   ["-u" "--tarball URL" "URL for the VoltDB tarball to install. May be either HTTP, HTTPS, or a local file on this control node. For instance, --tarball https://foo.com/voltdb-ent.tar.gz, or file://voltdb-ent.tar.gz"
     :validate [(partial re-find #"^(file|https?)://.*\.(tar)")
-               "Must be a file://, http://, or https:// URL including .tar"]]])
+               "Must be a file://, http://, or https:// URL including .tar"]]
 
-(def usage
-  (str "Usage: java -jar jepsen.voltdb.jar TEST-NAME [OPTIONS ...]
+   ["-w" "--workload NAME" "What workload should we run?"
+    :parse-fn keyword
+    :validate [workloads (cli/one-of workloads)]]])
 
-Runs a Jepsen test and exits with a status code:
+(defn voltdb-test
+  "Takes parsed CLI options from -main and constructs a Jepsen test map."
+  [opts]
+  (let [workload-name (:workload opts)
+        ; Right now workloads construct entire test maps. We'll refactor this
+        ; in the next commit.
+        workload ((workloads workload-name) opts)
+        db       (voltdb/db (:tarball opts) (:force-download opts))
+        nemesis (nemesis/nemesis-package
+                  {:db        db
+                   :nodes     (:nodes test)
+                   :faults    (:nemesis opts)
+                   ; TODO: add support for targeting primaries
+                   :partition {:targets [:majority :majorities-ring]}
+                   :pause     {:targets [:one :majority :all]}
+                   :kill      {:targets [:one :majority :all]}
+                   :interval  (:nemesis-interval opts)})
+        gen (->> (:generator workload)
+                 (gen/stagger (/ (:rate opts)))
+                 (gen/nemesis
+                   [(gen/sleep 5)
+                    (:generator nemesis)])
+                 (gen/time-limit (:time-limit opts)))
+        ; Is there a final generator for this workload?
+        gen (if-let [final (:final-generator workload)]
+              (gen/phases gen
+                          ; Recovery
+                          (gen/log "Recovering cluster")
+                          (gen/nemesis (:final-generator nemesis))
+                          (gen/log "Waiting for recovery")
+                          (gen/sleep 30)
+                          ; Final generators
+                          (gen/clients final))
+              ; No final generator
+              gen)]
+    (merge tests/noop-test
+           opts
+           {:name (str (name workload-name)
+                       " " (str/join "," (map name (:nemesis opts))))
+            :os        (if (:skip-os opts)
+                         os/noop
+                         (voltdb/os debian/os))
+            :generator gen
+            :client    (:client workload)
+            :nemesis   (:nemesis nemesis)
+            :db        db
+            :checker   (checker/compose
+                         {:perf       (checker/perf {:nemeses (:perf nemesis)})
+                          :clock      (checker/clock-plot)
+                          :stats      (checker/stats)
+                          :exceptions (checker/unhandled-exceptions)
+                          :workload   (:checker workload)})})))
 
-  0     All tests passed
-  1     Some test failed
-  254   Invalid arguments
-  255   Internal Jepsen error
-
-Test names: " (str/join ", " (keys tests))
-       "\n\nOptions:\n"))
-
-(defn validate-test-name
-  "Takes a tools.cli result map, and adds an error if the given
-  arguments don't specify a valid test. Associates :test-fn otherwise."
-  [parsed]
-  (if (= 1 (count (:arguments parsed)))
-    (let [test-name (first (:arguments parsed))]
-      (if-let [f (get tests test-name)]
-        (assoc parsed :test-fn f)
-        (update parsed :errors conj
-                (str "I don't know how to run " test-name
-                     ", but I do know about "
-                     (str/join ", " (keys tests))))))
-    (update parsed :errors conj
-            (str "No test name was provided. Use one of "
-                 (str/join ", " (keys tests))))))
-
-(defn validate-tarball
-  "Ensures a tarball is present."
-  [parsed]
-  (if (:tarball (:options parsed))
-    parsed
-    (update parsed :errors conj "No tarball URL provided")))
-
-(defn rename-keys
-  "Given a map m, and a map of keys to replacement keys, yields m with keys
-  renamed."
-  [m replacements]
-  (reduce (fn [m [k k']]
-            (-> m
-                (assoc k' (get m k))
-                (dissoc k)))
-          m
-          replacements))
-
-(defn move-logfile!
-  "Moves jepsen.log to store/latest/"
-  []
-  (let [f  (io/file "jepsen.log")
-        f2 (io/file "store/latest/jepsen.log")
-	d1 (io/file "store/latest")]
-    (when (and (.exists f) (.exists d1) (not (.exists f2)))
-      ; Can't just rename because log4j retains the filehandle
-      (io/copy f f2)
-      (spit f "" :append false))))
+(defn all-tests
+  "Turns CLI options into a sequence of tests to perform."
+  [opts]
+  (let [nemeses   (if-let [n (:nemesis opts)]  [n] all-nemeses)
+        workloads (if-let [w (:workload opts)] [w] (keys workloads))]
+    (for [n nemeses, w workloads, i (range (:test-count opts))]
+      (voltdb-test (assoc opts :workload w, :nemesis n)))))
 
 (defn -main
+  "Main entry point for the CLI. Takes CLI options and runs tests, launches a
+  web server, analyzes results, etc."
   [& args]
-  (try
-    (let [{:keys [options
-                  arguments
-                  summary
-                  errors
-                  test-fn]} (-> args
-                               (cli/parse-opts optspec)
-                               validate-test-name
-                               validate-tarball)
-          options (rename-keys options {:strong-reads     :strong-reads?
-                                        :no-reads         :no-reads?
-                                        :force-download   :force-download?
-                                        :skip-os          :skip-os?
-                                        :node             :nodes})]
-
-      ; Help?
-      (when (:help options)
-        (println usage)
-        (println summary)
-        (System/exit 0))
-
-      ; Bad args?
-      (when-not (empty? errors)
-        (dorun (map println errors))
-        (System/exit 254))
-
-      (println "Test options:\n" (with-out-str (pprint options)))
-
-      (dotimes [i (:test-count options)]
-        (move-logfile!)
-        ; Run test!
-        (try
-          (when-not (:valid? (:results (jepsen/run! (test-fn options))))
-            (move-logfile!)
-            (System/exit 1))
-          (catch com.jcraft.jsch.JSchException e
-            (info e "SSH connection fault; aborting test and moving on")
-            (move-logfile!))))
-
-      (move-logfile!)
-      (System/exit 0))
-    (catch Throwable t
-      (move-logfile!)
-      (fatal t "Oh jeez, I'm sorry, Jepsen broke. Here's why:")
-      (System/exit 255))))
+  (cli/run! (merge (cli/single-test-cmd {:test-fn voltdb-test
+                                         :opt-spec opt-spec})
+                   (cli/test-all-cmd {:tests-fn all-tests
+                                      :opt-spec opt-spec})
+                   (cli/serve-cmd))
+            args))
