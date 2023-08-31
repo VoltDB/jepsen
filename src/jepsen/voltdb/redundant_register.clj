@@ -11,6 +11,7 @@
                     [tests        :as tests]]
             [jepsen.os.debian     :as debian]
             [jepsen.voltdb        :as voltdb]
+            [jepsen.voltdb [client :as vc]]
             [knossos.model        :as model]
             [knossos.op           :as op]
             [clojure.string       :as str]
@@ -20,41 +21,46 @@
 (defn client
   "A client which implements a register, identified by a key. The register is
   stored in n copies, all of which should agree."
-  [n conn]
-  (let [initialized? (promise)]
-    (reify client/Client
-      (setup! [_ test node]
-        (c/on node
-              (when (deliver initialized? true)
-                ; Create table
-                (voltdb/sql-cmd! "CREATE TABLE rregisters (
-                                    id            INTEGER NOT NULL,
-                                    copy          INTEGER NOT NULL,
-                                    value         INTEGER NOT NULL,
-                                    PRIMARY KEY   (id, copy)
+  ([n]
+   (client n nil (promise) nil))
+  ([n node initialized? conn]
+   (reify client/Client
+     (open! [_ test node]
+       (client n node initialized? (vc/connect node)))
+
+     (setup! [_ test]
+       (when (deliver initialized? true)
+         (c/on node
+               (vc/with-race-retry
+                 ; Create table
+                 (voltdb/sql-cmd! "CREATE TABLE rregisters (
+                                  id            INTEGER NOT NULL,
+                                  copy          INTEGER NOT NULL,
+                                  value         INTEGER NOT NULL,
+                                  PRIMARY KEY   (id, copy)
                                   );
                                   PARTITION TABLE rregisters ON COLUMN copy;")
-                (voltdb/sql-cmd! "CREATE PROCEDURE FROM CLASS jepsen.procedures.RRegisterUpsert;")))
-        (client n (voltdb/connect node)))
+                 (voltdb/sql-cmd! "CREATE PROCEDURE FROM CLASS jepsen.procedures.RRegisterUpsert;")))))
 
-      (invoke! [this test op]
-        (let [id    (key (:value op))
-              value (val (:value op))]
-          (case (:f op)
-            :read   (let [v (->> (voltdb/ad-hoc! conn "SELECT value FROM rregisters WHERE id = ? ORDER BY copy ASC;" id)
+     (invoke! [this test op]
+       (let [id    (key (:value op))
+             value (val (:value op))]
+         (case (:f op)
+           :read   (let [v (->> (vc/ad-hoc! conn "SELECT value FROM rregisters WHERE id = ? ORDER BY copy ASC;" id)
                                 first
                                 :rows
                                 (map :VALUE))]
-                      (assoc op
-                             :type :ok
-                             :value (independent/tuple id v)))
-            :write  (do (voltdb/call! conn "RRegisterUpsert"
-                                      id (long-array (range n)) value)
-                        (assoc op :type :ok)))))
+                     (assoc op
+                            :type :ok
+                            :value (independent/tuple id v)))
+           :write  (do (vc/call! conn "RRegisterUpsert"
+                                 id (long-array (range n)) value)
+                       (assoc op :type :ok)))))
 
-      (teardown! [_ test]
-        (voltdb/close! conn)))))
+     (teardown! [_ test])
 
+     (close! [_ test]
+       (vc/close! conn)))))
 
 (defn r   [_ _] {:type :invoke, :f :read, :value nil})
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
@@ -63,7 +69,7 @@
   "Verifies that every read shows n identical values for all copies."
   [n]
   (reify checker/Checker
-    (check [this test model history opts]
+    (check [this test history opts]
       (let [mixed-reads (->> history
                              (r/filter (fn [op]
                                          (let [vs (:value op)]
@@ -76,32 +82,16 @@
         {:valid? (empty? mixed-reads)
          :mixed-reads mixed-reads}))))
 
-(defn rregister-test
-  "Takes a tarball URL"
-  [url]
-  (let [n 5]
-    (assoc tests/noop-test
-           :name    "voltdb redundant-register"
-           :os      debian/os
-           :client  (client n nil)
-           :db      (voltdb/db url)
-           :model   (model/cas-register 0)
-           :checker (checker/compose
-                      {:atomic (independent/checker (atomic-checker n))
-                       :perf   (checker/perf)})
-           :nemesis (nemesis/partition-random-halves)
-           :concurrency 100
-           :generator (->> (independent/concurrent-generator
-                             10
-                             (range)
-                             (fn [id]
-                               (->> w
-                                    (gen/reserve 5 r)
-                                    (gen/delay 1/100)
-                                    (gen/time-limit 30))))
-                           (gen/nemesis
-                             (gen/seq (cycle [(gen/sleep 30)
-                                              {:type :info :f :start}
-                                              (gen/sleep 30)
-                                              {:type :info :f :stop}])))
-                           (gen/time-limit 200)))))
+(defn workload
+  "Takes CLI options and returns a workload for testing redundant registers, to
+  be merged into a test map."
+  [opts]
+  (let [n (count (:nodes opts))]
+    {:client   (client n)
+     :checker   (independent/checker (atomic-checker n))
+     :generator (independent/concurrent-generator
+                               (* 2 n)
+                               (range)
+                               (fn [id]
+                                 (->> w
+                                      (gen/reserve n r))))}))
