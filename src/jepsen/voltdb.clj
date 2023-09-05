@@ -77,10 +77,13 @@
   (xml/emit-str
    (xml/sexp-as-element
     [:deployment {}
-     [:cluster {:hostcount (count (:nodes test))
-                ;                  :sitesperhost 2
-                ; TODO: Make k configurable
-                :kfactor (min 4 (dec (count (:nodes test))))}]
+      [:cluster ( let [nodeCount (count (:nodes test)) kfac (:kfactor test) sph (:sitesperhost test)
+                clusterSpec {:hostcount nodeCount
+                :kfactor ( if-not ( < kfac nodeCount ) 
+                                 (throw (Exception. (str "kfactor must be smaller than nodes count = " nodeCount)))
+                            kfac)} ] 
+                ( if (= sph nil) clusterSpec  
+                                 (merge clusterSpec {:sitesperhost sph}) ) )]
      [:paths {}
       [:voltdbroot {:path base-dir}]]
      ; We need to choose a heartbeat high enough so that we can spam

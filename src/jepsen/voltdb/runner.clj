@@ -75,6 +75,16 @@
                                  (or (nemeses nem)
                                      (special-nemeses nem))))
                (cli/one-of (concat nemeses (keys special-nemeses)))]]
+    
+    ["-k" "--kfactor NUMBER" "K-factor for database installation"
+    :parse-fn #(Integer/parseInt %)
+    :default 1
+    :validate [pos? "Must be positive"]]
+
+    [nil "--sitesperhost NUMBER" "Sites per host value for the database installation"
+    :parse-fn #(Integer/parseInt %)
+    :validate [pos? "Must be positive"]]
+
 
    [nil "--nemesis-interval SECONDS" "How long between nemesis operations, on average, for each class of fault?"
     ; In my testing, Volt often takes 20 seconds or so just to start up--we
@@ -159,6 +169,7 @@
             :generator gen
             :client    (:client workload)
             :nemesis   (:nemesis nemesis)
+            ;:kfactor   (:kfactor kfactor)
             :db        db
             :checker   (checker/compose
                          {:perf       (checker/perf {:nemeses (:perf nemesis)})
