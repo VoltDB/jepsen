@@ -77,12 +77,12 @@
                (cli/one-of (concat nemeses (keys special-nemeses)))]]
     
     ["-k" "--kfactor NUMBER" "K-factor for database installation"
-    :parse-fn #(Integer/parseInt %)
+    :parse-fn #(Long/parseLong %)
     :default 1
     :validate [pos? "Must be positive"]]
 
     [nil "--sitesperhost NUMBER" "Sites per host value for the database installation"
-    :parse-fn #(Integer/parseInt %)
+    :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
 
