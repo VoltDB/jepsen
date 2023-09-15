@@ -37,8 +37,7 @@
 (def username "voltdb")
 (def base-dir "/tmp/jepsen-voltdb")
 (def client-port 21212)
-(def export-csv-file "What file do we export CSV data to?"
-  (str base-dir "/export.csv"))
+(def export-csv-files "export")
 
 (defn os
   "Given OS, plus python & jdk"
@@ -102,8 +101,9 @@
      [:export
       [:configuration {:enabled true, :target "export_target", :type "file"}
        [:property {:name "type"} "csv"]
-       [:property {:name "nonce"} "export_target_2"]
-       [:property {:name "outdir"} export-csv-file]]]])))
+       [:property {:name "nonce"} "export"]
+       [:property {:name "outdir"} export-csv-file]
+       ]]])))
 
 (defn init-db!
   "run voltdb init"
@@ -300,11 +300,16 @@
        (c/exec :rm :-rf (c/lit (str base-dir "/*"))))
       (vc/kill-reconnect-threads!))
 
+    (def export-files (let [export_dir (str base-dir "/" export-csv-files )] 
+             (into [] (map #(str output %) (filter #(re-find #".*export.*csv\z" %) (seq (.list  (clojure.java.io/file export_dir))))))))
     db/LogFiles
     (log-files [db test node]
-      [(str base-dir "/log/stdout.log")
-       (str base-dir "/log/volt.log")
-       (str base-dir "/deployment.xml")])
+      (concat 
+        [(str base-dir "/log/stdout.log")
+        (str base-dir "/log/volt.log")
+        (str base-dir "/deployment.xml")] 
+        export-files))
+    
 
     db/Kill
     (kill! [this test node]
