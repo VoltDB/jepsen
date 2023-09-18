@@ -37,6 +37,7 @@
 (def username "voltdb")
 (def base-dir "/tmp/jepsen-voltdb")
 (def client-port 21212)
+(def export-csv-dir "export")
 (def export-csv-files "export")
 
 (defn os
@@ -101,8 +102,8 @@
      [:export
       [:configuration {:enabled true, :target "export_target", :type "file"}
        [:property {:name "type"} "csv"]
-       [:property {:name "nonce"} "export"]
-       [:property {:name "outdir"} export-csv-file]
+       [:property {:name "nonce"} export-csv-files]
+       [:property {:name "outdir"} export-csv-dir]
        ]]])))
 
 (defn init-db!
@@ -299,16 +300,18 @@
       (c/su
        (c/exec :rm :-rf (c/lit (str base-dir "/*"))))
       (vc/kill-reconnect-threads!))
-
-    (def export-files (let [export_dir (str base-dir "/" export-csv-files )] 
-             (into [] (map #(str output %) (filter #(re-find #".*export.*csv\z" %) (seq (.list  (clojure.java.io/file export_dir))))))))
+     
     db/LogFiles
-    (log-files [db test node]
-      (concat 
-        [(str base-dir "/log/stdout.log")
-        (str base-dir "/log/volt.log")
-        (str base-dir "/deployment.xml")] 
-        export-files))
+    (log-files [db test node] 
+      (let [export-dir (str base-dir "/" export-csv-dir) 
+            export-files (into [] (map #(str export-dir %) 
+                                       (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files
+                                               (seq (.list  (clojure.java.io/file export-dir))))))]
+        (concat 
+          [(str base-dir "/log/stdout.log") 
+           (str base-dir "/log/volt.log") 
+           (str base-dir "/deployment.xml")] 
+          export-files)))
     
 
     db/Kill
