@@ -1,4 +1,4 @@
-(ns jepsen.voltdb.sp_export
+(ns jepsen.voltdb.sp-export
   "Implements a table of single registers identified by id. Verifies
   linearizability over independent registers."
   (:require [jepsen [core         :as jepsen]
