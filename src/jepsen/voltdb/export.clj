@@ -60,7 +60,7 @@
                 part   INTEGER NOT NULL,
                 value  BIGINT NOT NULL
                 );
-                PARTITION TABLE " table-name " ON COLUMN value;
+                PARTITION TABLE " table-name " ON COLUMN part;
 
                 CREATE STREAM " stream-name " PARTITION ON COLUMN part
                 EXPORT TO TARGET export_target (
@@ -68,8 +68,8 @@
                   value BIGINT NOT NULL
                 );"))
               (voltdb/sql-cmd!
-                (str "CREATE PROCEDURE FROM CLASS jepsen.procedures.ExportWrite;
-                     PARTITION PROCEDURE ExportWrite ON TABLE " table-name " COLUMN part;"))
+                (str "CREATE PROCEDURE PARTITION ON TABLE " table-name 
+                     " COLUMN part FROM CLASS jepsen.procedures.ExportWrite;"))
             (info node "tables created")))))
 
   (invoke! [_ test op]
