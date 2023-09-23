@@ -30,7 +30,9 @@
              [generator    :as gen]
              [history      :as h]]
             [jepsen.voltdb        :as voltdb]
-            [jepsen.voltdb [client :as vc]]))
+            [jepsen.voltdb [client :as vc]]
+            [clojure.set :as set]
+            [jepsen.db :as db]))
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
@@ -79,13 +81,19 @@
         :write (do (vc/call! conn "ExportWrite"
                              (rand-int 1000)
                              (long-array (:value op)))
+                   
                    (assoc op :type :ok))
 
         ; TODO: implement this
-        :db-read :unimplemented
+        :db-read (let [v (->> 
+                          (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;") )
+                               first
+                               :rows
+                               (map :VALUE))]
+                     (assoc op :type :ok :value v))
 
         ; TODO: implement this
-        :export-read :unimplemented
+        :export-read (assoc op :type :ok)
         )))
 
   (teardown! [_ test])
@@ -127,41 +135,40 @@
             ; Which elements showed up in the DB reads?
             read-db (->> history
                          h/oks
-                         (h/filter-f :read-db)
+                         (h/filter-f :db-read)
                          (mapcat :value)
                          (into (sorted-set)))
+            _ (info (str "BZ HERE read-db values: " read-db))
             ; Which elements showed up in the export?
             read-export (->> history
                              h/oks
-                             (h/filter-f :read-export)
+                             (h/filter-f :export-read)
                              (mapcat :value)
                              (into (sorted-set)))
             ; Did we lose any writes confirmed to the client?
-            lost          (set/difference client-ok read-db)
-            ; How far behind the confirmed writes is the table?
-            db-unseen     (set/difference read-db read-export)
-            ; How far behind the table is the export?
-            export-unseen (set/difference read-db read-export)
-            ; Writes present in the export but the client thought they failed
-            exported-but-client-failed (set/intersection read-export
-                                                         client-failed)
-           ; Writes present in export but missing from DB
-           exported-but-not-in-db (set/difference read-export read-db)]
-        {:valid? (and (empty? lost)
-                      (empty? exported-but-client-failed)
-                      (empty? exported-but-not-in-db))
+            lost-transactions          (set/difference client-ok read-db)
+            ; Did we loo
+            lost-export (set/difference read-db read-export)
+            ; Writes present in export but missing from DB
+            phantom-export (set/difference read-export read-db)
+            ; Writes present in the export but the client thought they failed 
+            exported-but-client-failed (set/intersection read-export client-failed) ] 
+                                                                                    
+        {:valid? (and (empty? lost-transactions)
+                      (empty? phantom-export)
+                      (empty? lost-export))
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
          :read-db-count                    (count read-db)
          :read-export-count                (count read-export)
-         :lost-count                       (count lost)
-         :db-unseen-count                  (count db-unseen)
-         :export-unseen-count              (count export-unseen)
-         :exported-but-client-failed-count (count exported-but-client-failed)
-         :exported-but-not-in-db-count     (count exported-but-not-in-db)
-         :lost                             lost
+         :lost-transaction-count           (count lost-transactions)
+         :lost-export-count                (count lost-export)
+         :phantom-export-count             (count phantom-export)
+         :exported-but-client-failed-count (count exported-but-client-failed) 
+         :lost-transactions                lost-transactions
          :exported-but-client-failed       exported-but-client-failed
-         :exported-but-not-in-db           exported-but-not-in-db}))))
+         :db-unseen                        lost-export
+         :phantom-export                   phantom-export }))))
 
 (defn workload
   "Takes CLI options and constructs a workload map."
