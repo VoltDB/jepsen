@@ -9,11 +9,11 @@
   At the end of the test we read the table (so we know what VoltDB thinks
   happened).
 
-    {:f :read-db, :values [1 2 3 4 ...]}
+    {:f :db-read, :values [1 2 3 4 ...]}
 
   ... and the exported data from the stream (so we know what was exported).
 
-    {:f :read-export, :values [1 2 ...]}
+    {:f :export-read, :values [1 2 ...]}
 
   We then compare the two to make sure that records aren't lost, and spurious
   records don't appear in the export."
@@ -133,34 +133,34 @@
                                (mapcat :value)
                                (into (sorted-set)))
             ; Which elements showed up in the DB reads?
-            read-db (->> history
+            db-read (->> history
                          h/oks
                          (h/filter-f :db-read)
                          (mapcat :value)
                          (into (sorted-set)))
-            _ (info (str "BZ HERE read-db values: " read-db))
-            ; Which elements showed up in the export?
-            read-export (->> history
+            _ (info (str "BZ HERE db-read values: " db-read))
+            ; Which elements showed up in the export? 
+            export-read (->> history
                              h/oks
                              (h/filter-f :export-read)
                              (mapcat :value)
                              (into (sorted-set)))
             ; Did we lose any writes confirmed to the client?
-            lost-transactions          (set/difference client-ok read-db)
+            lost-transactions          (set/difference client-ok db-read)
             ; Did we loo
-            lost-export (set/difference read-db read-export)
+            lost-export (set/difference db-read export-read)
             ; Writes present in export but missing from DB
-            phantom-export (set/difference read-export read-db)
+            phantom-export (set/difference export-read db-read)
             ; Writes present in the export but the client thought they failed 
-            exported-but-client-failed (set/intersection read-export client-failed) ] 
+            exported-but-client-failed (set/intersection export-read client-failed) ] 
                                                                                     
         {:valid? (and (empty? lost-transactions)
                       (empty? phantom-export)
                       (empty? lost-export))
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
-         :read-db-count                    (count read-db)
-         :read-export-count                (count read-export)
+         :db-read-count                    (count db-read)
+         :export-read-count                (count export-read)
          :lost-transaction-count           (count lost-transactions)
          :lost-export-count                (count lost-export)
          :phantom-export-count             (count phantom-export)
@@ -181,6 +181,6 @@
                          (map (fn [chunk]
                                 {:f :write, :value chunk})))
    :final-generator (gen/each-thread
-                      [(gen/until-ok {:f :read-db})
-                       (gen/until-ok {:f :read-export})])
+                      [(gen/until-ok {:f :db-read})
+                       (gen/until-ok {:f :export-read})])
    :checker (checker)})
