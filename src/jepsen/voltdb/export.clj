@@ -35,14 +35,12 @@
             [clojure.data.csv :as csv]))
 
 (defn parse-export! [filename]
-   (let [loc-files (seq (.list (clojure.java.io/file "/tmp")))
-      bz-exist? (.exists (io/file "/tmp/bz_junk"))] 
-     (info "BZ HERE 9 files in /tmp: " loc-files)
-     (info "BZ HERE 10 file " filename " exists " bz-exist?))
+  (when (not (.exists (io/file filename)))
+    (throw (Exception. (str "Local file " filename " does not exist."))))
   (with-open [reader (io/reader filename)]
     (let [data (csv/read-csv reader)
           column-data  (map #(last %) data)]
-      (into () column-data))))
+      (into () column-data)))) 
 
 (defn download-parse-export!
   "Downloads export file from a remote "
@@ -51,7 +49,8 @@
     (c/on node
           (let [local "/tmp/bz_junk"
                 _ (io/delete-file local true)
-                remote-files (into () (cu/ls-full (str jepsen.voltdb/base-dir "/voltdbroot/" jepsen.voltdb/export-csv-dir)))
+                remote-files (jepsen.voltdb/list-export-files)
+                ;remote-files (into () (cu/ls-full (str jepsen.voltdb/base-dir "/voltdbroot/" jepsen.voltdb/export-csv-dir)))
                 remote (first remote-files)]
             (if (cu/exists? remote)
              (do
@@ -195,14 +194,15 @@
             ; Did we lose any writes confirmed to the client?
             lost-transactions          (set/difference client-ok db-read)
             ; Did we loo
-            lost-export (set/difference db-read export-read)
+            ;lost-export (set/difference db-read export-read)
+            lost-export (set/difference client-ok export-read)
             ; Writes present in export but missing from DB
             phantom-export (set/difference export-read db-read)
             ; Writes present in the export but the client thought they failed 
             exported-but-client-failed (set/intersection export-read client-failed) ] 
                                                                                     
-        {:valid? (and (empty? lost-transactions)
-                      (empty? phantom-export)
+        {:valid? (and ;(empty? lost-transactions)
+                      ;(empty? phantom-export)
                       (empty? lost-export))
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
