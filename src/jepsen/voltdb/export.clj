@@ -32,7 +32,7 @@
             [jepsen.voltdb        :as voltdb]
             [jepsen.voltdb [client :as vc]] 
             [clojure.java.io :as io]
-            [closure.data.csv :as csv]))
+            [clojure.data.csv :as csv]))
 
 (defn parse-export! [filename]
    (let [loc-files (seq (.list (clojure.java.io/file "/tmp")))
