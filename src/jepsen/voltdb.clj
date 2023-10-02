@@ -40,6 +40,18 @@
 (def export-csv-dir "export")
 (def export-csv-files "export")
 
+(defn list-export-files 
+  "List export files for the export tests"
+  []
+  (let [export-dir (str base-dir "/voltdbroot/" export-csv-dir)
+        _ (info  "BZ export directory " export-dir)
+        all-files (into () (cu/ls-full export-dir))
+        _ (info "BZ all export files " all-files)] 
+    (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files 
+                             all-files) 
+  )
+)
+
 (defn os
   "Given OS, plus python & jdk"
   [os]
@@ -303,10 +315,14 @@
      
     db/LogFiles
     (log-files [db test node] 
-      (let [export-dir (str base-dir "/" export-csv-dir) 
-            export-files (into [] (map #(str export-dir %) 
-                                       (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files
-                                               (seq (.list  (clojure.java.io/file export-dir))))))]
+      (let [export-files (list-export-files)
+            _ (info "BZ all export files " export-files)
+            ;export-files (into [] (map #(str export-dir %) 
+            ;                           (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files
+            ;                                   (seq (.list  (clojure.java.io/file export-dir))))))
+            ;junk (cu/ls-full (str base-dir "/voltdbroot/" export-csv-dir))
+            ;_ (info (str "BZ HERE_5 listed the " base-dir "/voltdbroot/export directory : " (into () junk)))
+            ]
         (concat 
           [(str base-dir "/log/stdout.log") 
            (str base-dir "/log/volt.log") 

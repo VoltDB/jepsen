@@ -13,6 +13,7 @@
                  ; Might need these too?
                  ;[io.netty/netty-tcnative-boringssl-static "2.0.56.Final"]
                  ;[io.netty/netty-tcnative-classes "2.0.56.Final"]
+                 [org.clojure/data.csv "1.0.1"]
                  ]
   :jvm-opts ["-Xmx8g"
              "-XX:MaxInlineLevel=32"

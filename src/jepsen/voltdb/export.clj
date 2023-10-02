@@ -20,19 +20,62 @@
   (:require [clojure
              [pprint :refer [pprint]]
              [set          :as set]
-             [string       :as str]]
-            [clojure.core.reducers :as r]
+             [string       :as str]] 
             [clojure.tools.logging :refer [info warn]]
             [jepsen
              [checker      :as checker]
              [client       :as client]
              [control      :as c]
              [generator    :as gen]
-             [history      :as h]]
+             [history      :as h]] 
+            [jepsen.control.util  :as cu]
             [jepsen.voltdb        :as voltdb]
-            [jepsen.voltdb [client :as vc]]
-            [clojure.set :as set]
-            [jepsen.db :as db]))
+            [jepsen.voltdb [client :as vc]] 
+            [clojure.java.io :as io]
+            [closure.data.csv :as csv]))
+
+(defn parse-export! [filename]
+   (let [loc-files (seq (.list (clojure.java.io/file "/tmp")))
+      bz-exist? (.exists (io/file "/tmp/bz_junk"))] 
+     (info "BZ HERE 9 files in /tmp: " loc-files)
+     (info "BZ HERE 10 file " filename " exists " bz-exist?))
+  (with-open [reader (io/reader filename)]
+    (let [data (csv/read-csv reader)
+          column-data  (map #(last %) data)]
+      (into () column-data))))
+
+(defn download-parse-export!
+  "Downloads export file from a remote "
+  [node]
+  (locking download-parse-export!
+    (c/on node
+          (let [local "/tmp/bz_junk"
+                _ (io/delete-file local true)
+                remote-files (into () (cu/ls-full (str jepsen.voltdb/base-dir "/voltdbroot/" jepsen.voltdb/export-csv-dir)))
+                remote (first remote-files)]
+            (if (cu/exists? remote)
+             (do
+               (info "Downloading " remote " to " local "from node " node)
+               (try
+                 (c/download remote local)
+                 (catch java.io.IOException e
+                   (if (= "Pipe closed" (.getMessage e))
+                     (info remote "pipe closed")
+                     (throw e)))
+                 )
+               (let [d (parse-export! local)]
+                 (info "BZ HERE 7 download of " remote " to " local " is complete on node " node " data: " d)
+                 (io/delete-file local)
+                 (into () d))
+               )
+             (do (info "The file " remote "doesn't exist on node " node)
+                 (into ())))
+          ))))
+
+(defn export-data!
+  [test]
+  (into [] (flatten (map  download-parse-export! (:nodes test))))
+  )
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
@@ -84,17 +127,21 @@
                    
                    (assoc op :type :ok))
 
-        ; TODO: implement this
+        ; Read all data from the table '(table-name)
         :db-read (let [v (->> 
-                          (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;") )
+                          (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;"))
                                first
                                :rows
                                (map :VALUE))]
                      (assoc op :type :ok :value v))
-
-        ; TODO: implement this
-        :export-read (assoc op :type :ok)
-        )))
+         
+        ; Read all exported data from cvs file
+        :export-read (let [v (export-data! test)]
+                        (assoc op :type :ok :value v))
+        )
+        (catch Exception e 
+              (assoc op :type type, :error op) 
+              (throw e))))
 
   (teardown! [_ test])
 
@@ -180,7 +227,7 @@
    :generator       (->> (rand-int-chunks)
                          (map (fn [chunk]
                                 {:f :write, :value chunk})))
-   :final-generator (gen/each-thread
+   :final-generator (gen/once
                       [(gen/until-ok {:f :db-read})
                        (gen/until-ok {:f :export-read})])
    :checker (checker)})
