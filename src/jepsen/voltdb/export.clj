@@ -41,8 +41,9 @@
     (throw (Exception. (str "Local file " filename " does not exist."))))
   (with-open [reader (io/reader filename)]
     (let [data (csv/read-csv reader)]
-      (into () (->> data 
-                    (map #(last %)) 
+      (into () (->> data      ; since scv/read-scv produces a lazy collection which dissappears as soon as 
+                              ; the file is closed, we need to insert it into an empty list -> into()
+                    (map #(last %))
                     (map #(Long/parseLong %)))))))
 
 (defn download-parse-export!
@@ -114,7 +115,7 @@
                   value BIGINT NOT NULL
                 );"))
               (voltdb/sql-cmd!
-                (str "CREATE PROCEDURE PARTITION ON TABLE " table-name 
+                (str "CREATE PROCEDURE PARTITION ON TABLE " table-name
                      " COLUMN part FROM CLASS jepsen.procedures.ExportWrite;"))
             (info node "tables created")))))
 
@@ -125,9 +126,7 @@
         :write (do (vc/call! conn "ExportWrite"
                              (rand-int 1000)
                              (long-array (:value op)))
-                   
                    (assoc op :type :ok))
-
         ; Read all data from the table '(table-name)
         :db-read (let [v (->>
                           (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;"))
@@ -135,7 +134,6 @@
                                :rows
                                (map :VALUE))]
                      (assoc op :type :ok :value v))
-         
         ; Read all exported data from cvs file
         :export-read (let [v (export-data! test)]
                         (assoc op :type :ok :value v))
@@ -174,42 +172,42 @@
                            (h/filter-f :write)
                            (mapcat :value)
                            (into (sorted-set)))
-            _ (info "BZ HERE client-ok values: count " (count client-ok))
+            _ (info "client-ok count: " (count client-ok))
             ; Which elements did we tell the client had failed?
             client-failed (->> history
                                h/fails
                                (h/filter-f :write)
                                (mapcat :value)
-                               (into (sorted-set))) 
-            _ (info "BZ HERE client-failed values: count " (count client-failed))
+                               (into (sorted-set)))
+            _ (info "client-failed count: " (count client-failed))
             ; Which elements showed up in the DB reads?
             db-read (->> history
                          h/oks
                          (h/filter-f :db-read)
                          (mapcat :value)
                          (into (sorted-set)))
-            _ (info "BZ HERE db-read values: " db-read)
-            ; Which elements showed up in the export? 
+            _ (info "db-read values count " (count db-read))
+            ; Which elements showed up in the export?
             export-read (->> history
                              h/oks
                              (h/filter-f :export-read)
                              (mapcat :value)
                              (into (sorted-set)))
-            _ (info "BZ HERE export-read values: " export-read)
+            _ (info "BZ HERE export-read values: " (count export-read))
             ; Did we lose any writes confirmed to the client?
             lost-transactions (set/difference client-ok db-read)
-            ; Did we loo
-            ;lost-export (set/difference db-read export-read)
-            lost-export (set/difference client-ok export-read)
+            _ (info "lost-transaction : " lost-transactions)
+            ; Did we loose transaction in export-read
+            lost-export (set/difference db-read export-read)
+            _ (info "lost-export : " lost-export)
             ; Writes present in export but missing from DB
-            phantom-export (set/difference export-read db-read)
+            phantom-export (set/difference export-read db-read) 
+            _ (info "phantom-export : " phantom-export)
             ; Writes present in the export but the client thought they failed 
             exported-but-client-failed (set/intersection export-read client-failed) ] 
                                                                                     
-        {:valid? (empty? lost-export)
-                 ;(and ;(empty? lost-transactions)
-                 ;     (empty? phantom-export)
-                 ;     (empty? lost-export))
+        {:valid? (and (empty? phantom-export) 
+                      (empty? lost-export))
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
          :db-read-count                    (count db-read)
@@ -219,9 +217,9 @@
          :phantom-export-count             (count phantom-export)
          :exported-but-client-failed-count (count exported-but-client-failed) 
          :lost-transactions                lost-transactions
-         :exported-but-client-failed       exported-but-client-failed
          :lost_export                      lost-export
-         :phantom-export                   phantom-export }))))
+         :phantom-export                   phantom-export 
+         :exported-but-client-failed       exported-but-client-failed}))))
 
 (defn workload
   "Takes CLI options and constructs a workload map."
