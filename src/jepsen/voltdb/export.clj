@@ -20,56 +20,58 @@
   (:require [clojure
              [pprint :refer [pprint]]
              [set          :as set]
-             [string       :as str]] 
+             [string       :as str]]
             [clojure.tools.logging :refer [info warn]]
             [jepsen
              [checker      :as checker]
              [client       :as client]
              [control      :as c]
              [generator    :as gen]
-             [history      :as h]] 
+             [history      :as h]]
             [jepsen.control.util  :as cu]
             [jepsen.voltdb        :as voltdb]
-            [jepsen.voltdb [client :as vc]] 
+            [jepsen.voltdb [client :as vc]]
             [clojure.java.io :as io]
             [clojure.data.csv :as csv]))
+
+(def tmp-local-file "/tmp/tmp-export")
 
 (defn parse-export! [filename]
   (when (not (.exists (io/file filename)))
     (throw (Exception. (str "Local file " filename " does not exist."))))
   (with-open [reader (io/reader filename)]
-    (let [data (csv/read-csv reader)
-          column-data  (map #(last %) data)]
-      (into () column-data)))) 
+    (let [data (csv/read-csv reader)]
+      (into () (->> data 
+                    (map #(last %)) 
+                    (map #(Long/parseLong %)))))))
 
 (defn download-parse-export!
   "Downloads export file from a remote "
   [node]
   (locking download-parse-export!
     (c/on node
-          (let [local "/tmp/bz_junk"
-                _ (io/delete-file local true)
-                remote-files (jepsen.voltdb/list-export-files)
-                ;remote-files (into () (cu/ls-full (str jepsen.voltdb/base-dir "/voltdbroot/" jepsen.voltdb/export-csv-dir)))
-                remote (first remote-files)]
-            (if (cu/exists? remote)
-             (do
-               (info "Downloading " remote " to " local "from node " node)
-               (try
-                 (c/download remote local)
-                 (catch java.io.IOException e
-                   (if (= "Pipe closed" (.getMessage e))
-                     (info remote "pipe closed")
-                     (throw e)))
-                 )
-               (let [d (parse-export! local)]
-                 (info "BZ HERE 7 download of " remote " to " local " is complete on node " node " data: " d)
-                 (io/delete-file local)
-                 (into () d))
-               )
-             (do (info "The file " remote "doesn't exist on node " node)
-                 (into ())))
-          ))))
+          (flatten
+           (let [local tmp-local-file
+                 res ()]
+            (io/delete-file local true)
+            (map (fn [remote]
+                   (if (cu/exists? remote)
+                     (do
+                       (info "Downloading " remote " to " local "from node " node)
+                       (try
+                         (c/download remote local)
+                         (catch java.io.IOException e
+                           (if (= "Pipe closed" (.getMessage e))
+                             (info remote "pipe closed")
+                             (throw e))))
+                       (let [d (parse-export! local)]
+                         (info "Getting export date from" remote " to " local " is complete on node " node)
+                         (io/delete-file local)
+                         (into res d)))
+                     (do (info "The file " remote "doesn't exist on node " node)
+                         (into res ()))))
+                 (jepsen.voltdb/list-export-files))))
+            )))
 
 (defn export-data!
   [test]
@@ -127,7 +129,7 @@
                    (assoc op :type :ok))
 
         ; Read all data from the table '(table-name)
-        :db-read (let [v (->> 
+        :db-read (let [v (->>
                           (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;"))
                                first
                                :rows
@@ -138,8 +140,8 @@
         :export-read (let [v (export-data! test)]
                         (assoc op :type :ok :value v))
         )
-        (catch Exception e 
-              (assoc op :type type, :error op) 
+        (catch Exception e
+              (assoc op :type type, :error op)
               (throw e))))
 
   (teardown! [_ test])
@@ -172,27 +174,30 @@
                            (h/filter-f :write)
                            (mapcat :value)
                            (into (sorted-set)))
+            _ (info "BZ HERE client-ok values: count " (count client-ok))
             ; Which elements did we tell the client had failed?
             client-failed (->> history
                                h/fails
                                (h/filter-f :write)
                                (mapcat :value)
-                               (into (sorted-set)))
+                               (into (sorted-set))) 
+            _ (info "BZ HERE client-failed values: count " (count client-failed))
             ; Which elements showed up in the DB reads?
             db-read (->> history
                          h/oks
                          (h/filter-f :db-read)
                          (mapcat :value)
                          (into (sorted-set)))
-            _ (info (str "BZ HERE db-read values: " db-read))
+            _ (info "BZ HERE db-read values: " db-read)
             ; Which elements showed up in the export? 
             export-read (->> history
                              h/oks
                              (h/filter-f :export-read)
                              (mapcat :value)
                              (into (sorted-set)))
+            _ (info "BZ HERE export-read values: " export-read)
             ; Did we lose any writes confirmed to the client?
-            lost-transactions          (set/difference client-ok db-read)
+            lost-transactions (set/difference client-ok db-read)
             ; Did we loo
             ;lost-export (set/difference db-read export-read)
             lost-export (set/difference client-ok export-read)
@@ -201,9 +206,10 @@
             ; Writes present in the export but the client thought they failed 
             exported-but-client-failed (set/intersection export-read client-failed) ] 
                                                                                     
-        {:valid? (and ;(empty? lost-transactions)
-                      ;(empty? phantom-export)
-                      (empty? lost-export))
+        {:valid? (empty? lost-export)
+                 ;(and ;(empty? lost-transactions)
+                 ;     (empty? phantom-export)
+                 ;     (empty? lost-export))
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
          :db-read-count                    (count db-read)
@@ -214,7 +220,7 @@
          :exported-but-client-failed-count (count exported-but-client-failed) 
          :lost-transactions                lost-transactions
          :exported-but-client-failed       exported-but-client-failed
-         :db-unseen                        lost-export
+         :lost_export                      lost-export
          :phantom-export                   phantom-export }))))
 
 (defn workload
@@ -227,7 +233,7 @@
    :generator       (->> (rand-int-chunks)
                          (map (fn [chunk]
                                 {:f :write, :value chunk})))
-   :final-generator (gen/once
+   :final-generator (gen/phases
                       [(gen/until-ok {:f :db-read})
                        (gen/until-ok {:f :export-read})])
    :checker (checker)})
