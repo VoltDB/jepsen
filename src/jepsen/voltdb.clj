@@ -43,10 +43,11 @@
 (defn list-export-files 
   "List export files for the export tests"
   []
-  (let [export-dir (str base-dir "/voltdbroot/" export-csv-dir) 
-        all-files (into () (cu/ls-full export-dir))] 
-    (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files 
-                             all-files)))
+  (let [export-dir (str base-dir "/voltdbroot/" export-csv-dir)]
+    (if (cu/exists? export-dir) 
+      (into [] (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files 
+                      (into () (cu/ls-full export-dir))))
+      (into []))))
 
 (defn os
   "Given OS, plus python & jdk"
@@ -303,6 +304,7 @@
         (when (= node (jepsen/primary test))
           (load-stored-procedures! node))))
 
+    ; BZ TODO need proper shut-down before killing processes....
     (teardown! [this test node]
       (db/kill! this test node)
       (c/su
@@ -317,22 +319,37 @@
           [(str base-dir "/log/stdout.log") 
            (str base-dir "/log/volt.log") 
            (str base-dir "/deployment.xml")] 
-          export-files)))
-    
+          export-files))) 
 
+    ; This is a debug version of "kill" to print debug info
+    ; kill runs with pid taken from pidfile as in "cu/stop-deamon".
+    ; Here we repeat this code to print PID 
+    ;db/Kill
+    ;(kill! [this test node]
+    ;  (c/su
+    ;    (let [pidfile (str base-dir "/pidfile")]
+    ;      ( if (cu/exists? pidfile)
+    ;         (let [pid (Long/parseLong (c/exec :cat pidfile))]
+    ;           (info "The pid file " pidfile " with process " pid))
+    ;         (info "The pid file " pidfile " does NOT exist")) 
+    ;      (cu/stop-daemon! pidfile))))
+    
     db/Kill
-    (kill! [this test node]
-      (c/su
-        (cu/stop-daemon! (str base-dir "/pidfile"))))
+    (kill! [this test node] 
+      ( do (info "BZ killing DB on node " node )
+        (c/su
+        (cu/stop-daemon! (str base-dir "/pidfile")))))
 
     (start! [this test node]
       (start-daemon! test))
+      ;(do (info "BZ starting DB on node " node) 
+          ;(start-daemon! test)))
+          ;(start-daemon! test))
 
+    ;Pause and resume is not implemented properly. 
     db/Pause
     (pause! [this test node]
-      ; TODO: target volt specifically
       (c/su (cu/grepkill! :stop "java")))
 
     (resume! [this test node]
-      ; TODO: target volt specifically
       (c/su (cu/grepkill! :cont "java")))))

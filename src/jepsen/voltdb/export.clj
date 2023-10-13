@@ -150,10 +150,10 @@
 (defn rand-int-chunks
   "A lazy sequence of sequential integers grouped into randomly sized small
   vectors like [1 2] [3 4 5 6] [7] ..."
-  ([] (rand-int-chunks 0))
-  ([start]
+  ([opts] (rand-int-chunks opts 0))
+  ([opts start]
    (lazy-seq
-     (let [chunk-size (inc (rand-int 16))
+     (let [chunk-size (inc (:transactionsize opts))
            end        (+ start chunk-size)
            chunk      (vec (range start end))]
        (cons chunk (rand-int-chunks end))))))
@@ -193,20 +193,21 @@
                              (h/filter-f :export-read)
                              (mapcat :value)
                              (into (sorted-set)))
-            _ (info "BZ HERE export-read values: " (count export-read))
+            _ (info "export-read values count: " (count export-read))
             ; Did we lose any writes confirmed to the client?
             lost-transactions (set/difference client-ok db-read)
-            _ (info "lost-transaction : " lost-transactions)
+            _ (info "lost-transaction count: " (count lost-transactions))
             ; Did we loose transaction in export-read
             lost-export (set/difference db-read export-read)
-            _ (info "lost-export : " lost-export)
+            _ (info "lost-export count: " (count lost-export))
             ; Writes present in export but missing from DB
-            phantom-export (set/difference export-read db-read) 
-            _ (info "phantom-export : " phantom-export)
+            phantom-export (set/difference export-read db-read)
+            _ (info "phantom-export count: " (count phantom-export))
             ; Writes present in the export but the client thought they failed 
             exported-but-client-failed (set/intersection export-read client-failed) ] 
-                                                                                    
-        {:valid? (and (empty? phantom-export) 
+
+        {:valid? (and (empty? lost-transactions)
+                      (empty? phantom-export) 
                       (empty? lost-export))
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
@@ -215,11 +216,12 @@
          :lost-transaction-count           (count lost-transactions)
          :lost-export-count                (count lost-export)
          :phantom-export-count             (count phantom-export)
-         :exported-but-client-failed-count (count exported-but-client-failed) 
-         :lost-transactions                lost-transactions
-         :lost_export                      lost-export
-         :phantom-export                   phantom-export 
-         :exported-but-client-failed       exported-but-client-failed}))))
+         :exported-but-client-failed-count (count exported-but-client-failed)
+         ;:lost-transactions                lost-transactions
+         ;:lost_export                      lost-export
+         :phantom-export                   phantom-export
+         ;:exported-but-client-failed       exported-but-client-failed
+         }))))
 
 (defn workload
   "Takes CLI options and constructs a workload map."
@@ -228,7 +230,7 @@
                          :stream-name "export_stream"
                          :target-name "export_target"
                          :initialized? (promise)})
-   :generator       (->> (rand-int-chunks)
+   :generator       (->> (rand-int-chunks opts)
                          (map (fn [chunk]
                                 {:f :write, :value chunk})))
    :final-generator (gen/phases
