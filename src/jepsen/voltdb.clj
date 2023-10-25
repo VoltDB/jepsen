@@ -324,27 +324,33 @@
     ; This is a debug version of "kill" to print debug info
     ; kill runs with pid taken from pidfile as in "cu/stop-deamon".
     ; Here we repeat this code to print PID 
-    ;db/Kill
-    ;(kill! [this test node]
-    ;  (c/su
-    ;    (let [pidfile (str base-dir "/pidfile")]
-    ;      ( if (cu/exists? pidfile)
-    ;         (let [pid (Long/parseLong (c/exec :cat pidfile))]
-    ;           (info "The pid file " pidfile " with process " pid))
-    ;         (info "The pid file " pidfile " does NOT exist")) 
-    ;      (cu/stop-daemon! pidfile))))
-    
     db/Kill
-    (kill! [this test node] 
-      ( do (info "BZ killing DB on node " node )
+    (kill! [this test node]
+      (do
+        (info "Killing VoltDB on node " node)
         (c/su
-        (cu/stop-daemon! (str base-dir "/pidfile")))))
+         (let [pidfile (str base-dir "/pidfile")]
+           ( if (cu/exists? pidfile)
+             (let [pid (Long/parseLong (c/exec :cat pidfile))]
+               (if (not (cu/daemon-running? pidfile))
+                 (info "Proces with id " pid "does NOT exist. Shutdown is not needed")))
+             (info "The pid file " pidfile "does NOT exist. Shutdown is not needed."))
+           (cu/stop-daemon! pidfile)))))
 
     (start! [this test node]
-      (start-daemon! test))
-      ;(do (info "BZ starting DB on node " node) 
-          ;(start-daemon! test)))
-          ;(start-daemon! test))
+      ;(start-daemon! test))
+      (let [pidfile (str base-dir "/pidfile")]
+       (c/su
+        ; Before running "start" check if a voltdb process already exists.
+        ; Otherwise, "exec" overwrites pid file while faling to restart volt. 
+        ; the pid file becomes wrong.
+        ; Note that nemesis "kill" starts DB on all nodes, even those that are not killed.
+        (if (and (cu/exists? pidfile) (cu/daemon-running? pidfile))
+          (let [pid (Long/parseLong (c/exec :cat pidfile))]
+             (info "The rocess with PID " pid "exists. Skipping starting VoltDB"))
+          (do (info "Starting DB on node " node)
+              (start-daemon! test))))))
+          
 
     ;Pause and resume is not implemented properly. 
     db/Pause
