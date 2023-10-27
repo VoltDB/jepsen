@@ -18,8 +18,7 @@
                            [export     :as export]
                            [multi      :as multi]
                            [nemesis    :as nemesis]
-                           [single     :as single]
-                           [sp-export  :as sp-export]
+                           [single     :as single] 
                            [redundant-register :as redundant-register]]))
 
 (def workloads
@@ -29,8 +28,7 @@
    :export             export/workload
    :multi              multi/workload
    :redundant-register redundant-register/workload
-   :single             single/workload
-   :sp-export          sp-export/workload})
+   :single             single/workload})
 
 (def nemeses
   "All nemesis faults we know about."
