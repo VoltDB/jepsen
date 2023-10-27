@@ -18,7 +18,7 @@
                            [export     :as export]
                            [multi      :as multi]
                            [nemesis    :as nemesis]
-                           [single     :as single] 
+                           [single     :as single]
                            [redundant-register :as redundant-register]]))
 
 (def workloads
@@ -200,7 +200,6 @@
   [& args]
   (cli/run! (merge (cli/single-test-cmd {:test-fn voltdb-test
                                          :opt-spec opt-spec})
-                   
                    (cli/test-all-cmd {:tests-fn all-tests
                                       :opt-spec opt-spec})
                    (cli/serve-cmd))
