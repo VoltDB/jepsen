@@ -146,6 +146,7 @@
                    :partition {:targets [:one]}
                    :pause     {:targets [:one]}
                    :kill      {:targets [:one]}
+                   ; This was the original target def for nemesis before we replaced it with "one"
                    ;:partition {:targets [:majority :majorities-ring]}
                    ;:pause     {:targets [:one :majority :all]}
                    ;:kill      {:targets [:one :majority :all]}
