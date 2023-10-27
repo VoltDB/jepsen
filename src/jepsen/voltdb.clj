@@ -39,6 +39,7 @@
 (def client-port 21212)
 (def export-csv-dir "export")
 (def export-csv-files "export")
+(def pidfile (str base-dir "/pidfile"))
 
 (defn list-export-files 
   "List export files for the export tests"
@@ -197,7 +198,7 @@
           (c/cd base-dir
                 (info "Starting voltdb")
                 (cu/start-daemon! {:logfile (str base-dir "/log/stdout.log")
-                                   :pidfile (str base-dir "/pidfile")
+                                   :pidfile pidfile
                                    :chdir   base-dir}
                                   (str base-dir "/bin/voltdb")
                                   :start
@@ -312,47 +313,47 @@
       (vc/kill-reconnect-threads!))
      
     db/LogFiles
-    (log-files [db test node] 
+    (log-files [db test node]
       (let [export-files (list-export-files)]
         (info "Exported files " export-files)
-        (concat 
-          [(str base-dir "/log/stdout.log") 
-           (str base-dir "/log/volt.log") 
-           (str base-dir "/deployment.xml")] 
-          export-files))) 
+        (concat
+          [(str base-dir "/log/stdout.log")
+           (str base-dir "/log/volt.log")
+           (str base-dir "/deployment.xml")]
+          export-files)))
 
     ; This is a debug version of "kill" to print debug info
     ; kill runs with pid taken from pidfile as in "cu/stop-deamon".
-    ; Here we repeat this code to print PID 
+    ; Here we repeat this code to print PID
     db/Kill
     (kill! [this test node]
       (do
         (info "Killing VoltDB on node " node)
         (c/su
-         (let [pidfile (str base-dir "/pidfile")]
+         (do
            ( if (cu/exists? pidfile)
              (let [pid (Long/parseLong (c/exec :cat pidfile))]
                (if (not (cu/daemon-running? pidfile))
                  (info "Proces with id " pid "does NOT exist. Shutdown is not needed")))
              (info "The pid file " pidfile "does NOT exist. Shutdown is not needed."))
+           ;this cu/stop-daemon! function won't be successfull if pidfile does not contain the right pid for the volt process
            (cu/stop-daemon! pidfile)))))
 
     (start! [this test node]
       ;(start-daemon! test))
-      (let [pidfile (str base-dir "/pidfile")]
-       (c/su
-        ; Before running "start" check if a voltdb process already exists.
-        ; Otherwise, "exec" overwrites pid file while faling to restart volt. 
-        ; the pid file becomes wrong.
-        ; Note that nemesis "kill" starts DB on all nodes, even those that are not killed.
-        (if (and (cu/exists? pidfile) (cu/daemon-running? pidfile))
-          (let [pid (Long/parseLong (c/exec :cat pidfile))]
-             (info "The rocess with PID " pid "exists. Skipping starting VoltDB"))
-          (do (info "Starting DB on node " node)
-              (start-daemon! test))))))
-          
+      (c/su
+              ; Before running "start" check if a voltdb process already exists.
+              ; If it exists, The linux "exec" command overwrites pid file while faling to restart volt. 
+              ; Afterwards, the pid file becomes wrong.
+              ; Note that nemesis "kill" starts DB on all nodes, even those where voltdb has not been killed. 
+              ; On those nodes we must not restard voltdb.
+       (if (and (cu/exists? pidfile) (cu/daemon-running? pidfile))
+         (let [pid (Long/parseLong (c/exec :cat pidfile))]
+           (info "The rocess with PID " pid "exists. Skipping starting VoltDB"))
+         (do (info "Starting VoltDB on node " node)
+             (start-daemon! test)))))
 
-    ;Pause and resume is not implemented properly. 
+    ;TODO Pause and resume is not implemented properly.
     db/Pause
     (pause! [this test node]
       (c/su (cu/grepkill! :stop "java")))

@@ -42,12 +42,13 @@
   (with-open [reader (io/reader filename)]
     (let [data (csv/read-csv reader)]
       (into () (->> data      ; since scv/read-scv produces a lazy collection which dissappears as soon as 
-                              ; the file is closed, we need to insert it into an empty list -> into()
+                              ; the file is closed, we need to insert it into an empty before the function is over
+                              ; list -> into()
                     (map #(last %))
                     (map #(Long/parseLong %)))))))
 
 (defn download-parse-export!
-  "Downloads export file from a remote "
+  "Downloads export file from a remote node"
   [node]
   (locking download-parse-export!
     (c/on node
@@ -66,7 +67,7 @@
                              (info remote "pipe closed")
                              (throw e))))
                        (let [d (parse-export! local)]
-                         (info "Getting export date from" remote " to " local " is complete on node " node)
+                         (info "Getting export data from" remote " to " local " is complete on node " node)
                          (io/delete-file local)
                          (into res d)))
                      (do (info "The file " remote "doesn't exist on node " node)
@@ -97,10 +98,8 @@
       (info node "Creating tables")
       (c/on node
             (vc/with-race-retry
-              ; I'm not exactly sure what to do here--we want to test
-              ; partitioned tables, I think, so we'll have an explicit
+              ; We test partitioned tables. We'll have an explicit
               ; partition column and send all our writes to one partition.
-              ;
               ; The `value` column will actually store written values.
               (voltdb/sql-cmd! (str
                 "CREATE TABLE " table-name " (
@@ -153,17 +152,15 @@
   ([opts] (rand-int-chunks opts 0))
   ([opts start]
    (lazy-seq
-     (let [chunk-size (inc (:transactionsize opts))
+     (let [chunk-size (inc (rand-int (:transactionsize opts 16)))
            end        (+ start chunk-size)
            chunk      (vec (range start end))]
-       (cons chunk (rand-int-chunks end))))))
+       (cons chunk (rand-int-chunks opts end))))))
 
 (defn checker
   "Basic safety checker. Just checks for set inclusion, not order or
   duplicates."
   []
-  ; TODO: This is just a sketch; I haven't gotten to feed this actual results
-  ; yet
   (reify checker/Checker
     (check [this test history opts]
       (let [; What elements were acknowledged to the client?

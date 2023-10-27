@@ -179,7 +179,6 @@
             :generator gen
             :client    (:client workload)
             :nemesis   (:nemesis nemesis)
-            ;:kfactor   (:kfactor kfactor)
             :db        db
             :checker   (checker/compose
                          {:perf       (checker/perf {:nemeses (:perf nemesis)})
