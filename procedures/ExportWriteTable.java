@@ -4,10 +4,9 @@ import org.voltdb.*;
 
 // Takes a partition key and an array of longs to insert, and inserts each as a
 // row into both a table and a stream.
-public class ExportWrite extends VoltProcedure {
+public class ExportWriteTable extends VoltProcedure {
   public final SQLStmt writeTable = new SQLStmt("INSERT INTO export_table (part, value) VALUES (?, ?);");
-  public final SQLStmt writeStream = new SQLStmt("INSERT INTO export_stream (part, value) VALUES (?, ?);");
-
+ 
   // Arrays of the function, key, and value for each op in the transaction.
   // We assume string keys and integer values.
   public long run(int part, long[] elements) {
