@@ -37,8 +37,18 @@
 (def username "voltdb")
 (def base-dir "/tmp/jepsen-voltdb")
 (def client-port 21212)
-(def export-csv-file "What file do we export CSV data to?"
-  (str base-dir "/export.csv"))
+(def export-csv-dir "export")
+(def export-csv-files "export")
+(def pidfile (str base-dir "/pidfile"))
+
+(defn list-export-files 
+  "List export files for the export tests"
+  []
+  (let [export-dir (str base-dir "/voltdbroot/" export-csv-dir)]
+    (if (cu/exists? export-dir) 
+      (into [] (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files 
+                      (into () (cu/ls-full export-dir))))
+      (into []))))
 
 (defn os
   "Given OS, plus python & jdk"
@@ -102,8 +112,9 @@
      [:export
       [:configuration {:enabled true, :target "export_target", :type "file"}
        [:property {:name "type"} "csv"]
-       [:property {:name "nonce"} "export_target_2"]
-       [:property {:name "outdir"} export-csv-file]]]])))
+       [:property {:name "nonce"} export-csv-files]
+       [:property {:name "outdir"} export-csv-dir]
+       ]]])))
 
 (defn init-db!
   "run voltdb init"
@@ -187,7 +198,7 @@
           (c/cd base-dir
                 (info "Starting voltdb")
                 (cu/start-daemon! {:logfile (str base-dir "/log/stdout.log")
-                                   :pidfile (str base-dir "/pidfile")
+                                   :pidfile pidfile
                                    :chdir   base-dir}
                                   (str base-dir "/bin/voltdb")
                                   :start
@@ -294,31 +305,58 @@
         (when (= node (jepsen/primary test))
           (load-stored-procedures! node))))
 
+    ; BZ TODO need proper shut-down before killing processes....
     (teardown! [this test node]
       (db/kill! this test node)
       (c/su
        (c/exec :rm :-rf (c/lit (str base-dir "/*"))))
       (vc/kill-reconnect-threads!))
-
+     
     db/LogFiles
     (log-files [db test node]
-      [(str base-dir "/log/stdout.log")
-       (str base-dir "/log/volt.log")
-       (str base-dir "/deployment.xml")])
+      (let [export-files (list-export-files)]
+        (info "Exported files " export-files)
+        (concat
+          [(str base-dir "/log/stdout.log")
+           (str base-dir "/log/volt.log")
+           (str base-dir "/deployment.xml")]
+          export-files)))
 
+    ; This is a debug version of "kill" to print debug info
+    ; kill runs with pid taken from pidfile as in "cu/stop-deamon".
+    ; Here we repeat this code to print PID
     db/Kill
     (kill! [this test node]
-      (c/su
-        (cu/stop-daemon! (str base-dir "/pidfile"))))
+      (do
+        (info "Killing VoltDB on node " node)
+        (c/su
+         (do
+           ( if (cu/exists? pidfile)
+             (let [pid (Long/parseLong (c/exec :cat pidfile))]
+               (if (not (cu/daemon-running? pidfile))
+                 (info "Proces with id " pid "does NOT exist. Shutdown is not needed")))
+             (info "The pid file " pidfile "does NOT exist. Shutdown is not needed."))
+           ;this cu/stop-daemon! function won't be successfull if pidfile does not contain the right pid for the volt process
+           (cu/stop-daemon! pidfile)))))
 
     (start! [this test node]
-      (start-daemon! test))
+      ;(start-daemon! test))
+      (c/su
+              ; Before running "start" check if a voltdb process already exists.
+              ; If it exists, The linux "exec" command overwrites pid file while faling to restart volt. 
+              ; Afterwards, the pid file becomes wrong.
+              ; Note that nemesis "kill" starts DB on all nodes, even those where voltdb has not been killed. 
+              ; On those nodes we must not restard voltdb.
+       (if (and (cu/exists? pidfile) (cu/daemon-running? pidfile))
+         (let [pid (Long/parseLong (c/exec :cat pidfile))]
+           (info "The rocess with PID " pid "exists. Skipping starting VoltDB"))
+         (do (info "Starting VoltDB on node " node)
+             (start-daemon! test)))))
 
+    ;TODO Pause and resume is not implemented properly.
     db/Pause
     (pause! [this test node]
-      ; TODO: target volt specifically
       (c/su (cu/grepkill! :stop "java")))
 
     (resume! [this test node]
-      ; TODO: target volt specifically
       (c/su (cu/grepkill! :cont "java")))))

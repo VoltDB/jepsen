@@ -11,8 +11,9 @@ public class ExportWrite extends VoltProcedure {
   // Arrays of the function, key, and value for each op in the transaction.
   // We assume string keys and integer values.
   public long run(int part, long[] elements) {
+    boolean flag = ((elements[0]%2)==0);
     for (int i = 0; i < elements.length; i++) {
-      if (Math.random() < 0.5) {
+     if (flag) {
         voltQueueSQL(writeTable, part, elements[i]);
         voltQueueSQL(writeStream, part, elements[i]);
       } else {

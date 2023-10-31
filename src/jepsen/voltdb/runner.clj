@@ -85,6 +85,10 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
+    [nil "--transactionsize NUMBER" "the range for the number of records per transaction"
+    :parse-fn #(Long/parseLong %) 
+    :default 16
+    :validate [pos? "Must be positive"]]
 
    [nil "--nemesis-interval SECONDS" "How long between nemesis operations, on average, for each class of fault?"
     ; In my testing, Volt often takes 20 seconds or so just to start up--we
@@ -137,9 +141,14 @@
                    :nodes     (:nodes test)
                    :faults    (:nemesis opts)
                    ; TODO: add support for targeting primaries
-                   :partition {:targets [:majority :majorities-ring]}
-                   :pause     {:targets [:one :majority :all]}
-                   :kill      {:targets [:one :majority :all]}
+                   :partition {:targets [:one]}
+                   :pause     {:targets [:one]}
+                   :kill      {:targets [:one]}
+                   ; This was the original target def for nemesis before we replaced it with "one"
+                   ;:partition {:targets [:majority :majorities-ring]}
+                   ;:pause     {:targets [:one :majority :all]}
+                   ;:kill      {:targets [:one :majority :all]}
+
                    :interval  (:nemesis-interval opts)})
         gen (->> (:generator workload)
                  (gen/stagger (/ (:rate opts)))
@@ -169,7 +178,6 @@
             :generator gen
             :client    (:client workload)
             :nemesis   (:nemesis nemesis)
-            ;:kfactor   (:kfactor kfactor)
             :db        db
             :checker   (checker/compose
                          {:perf       (checker/perf {:nemeses (:perf nemesis)})
