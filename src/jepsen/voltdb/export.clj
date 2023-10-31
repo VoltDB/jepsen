@@ -101,33 +101,50 @@
               ; We test partitioned tables. We'll have an explicit
               ; partition column and send all our writes to one partition.
               ; The `value` column will actually store written values.
-              (voltdb/sql-cmd! (str
-                "CREATE TABLE " table-name " (
-                part   INTEGER NOT NULL,
-                value  BIGINT NOT NULL
-                );
-                PARTITION TABLE " table-name " ON COLUMN part;
+              ( if (:export-table test)
+                (do
+                  (voltdb/sql-cmd!
+                   (str "CREATE TABLE " table-name " EXPORT TO TARGET " stream-name " on insert (
+                                                 part   INTEGER NOT NULL,
+                                                 value  BIGINT NOT NULL
+                                                 );
+                                                 PARTITION TABLE " table-name " ON COLUMN part;
+                                             "))
+                  (voltdb/sql-cmd!
+                   (str "CREATE PROCEDURE PARTITION ON TABLE " table-name
+                        " COLUMN part FROM CLASS jepsen.procedures.ExportWriteTable;")))
+                (do
+                  (voltdb/sql-cmd! (str
+                                    "CREATE TABLE " table-name " (
+                                               part   INTEGER NOT NULL,
+                                               value  BIGINT NOT NULL
+                                               );
+                                               PARTITION TABLE " table-name " ON COLUMN part;
+                               
+                                               CREATE STREAM " stream-name " PARTITION ON COLUMN part
+                                               EXPORT TO TARGET export_target (
+                                                 part INTEGER NOT NULL,
+                                                 value BIGINT NOT NULL
+                                               );"))
+                  (voltdb/sql-cmd!
+                   (str "CREATE PROCEDURE PARTITION ON TABLE " table-name
+                        " COLUMN part FROM CLASS jepsen.procedures.ExportWrite;"))))
 
-                CREATE STREAM " stream-name " PARTITION ON COLUMN part
-                EXPORT TO TARGET export_target (
-                  part INTEGER NOT NULL,
-                  value BIGINT NOT NULL
-                );"))
-              (voltdb/sql-cmd!
-                (str "CREATE PROCEDURE PARTITION ON TABLE " table-name
-                     " COLUMN part FROM CLASS jepsen.procedures.ExportWrite;"))
             (info node "tables created")))))
 
   (invoke! [_ test op]
     (try
       (case (:f op)
         ; Write to a random partition
-        :write (do (vc/call! conn "ExportWrite"
+        :write (do (vc/call! conn (if (:export-table test)
+                                    "ExportWriteTable"
+                                    "ExportWrite")
                              (rand-int 1000)
                              (long-array (:value op)))
                    (assoc op :type :ok))
         ; Read all data from the table '(table-name)
-        :db-read (let [v (->>
+        :db-read (let [ _ (info "BZ test :  " test )
+                       v (->>
                           (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;"))
                                first
                                :rows
@@ -226,6 +243,7 @@
   {:client (map->Client {:table-name  "export_table"
                          :stream-name "export_stream"
                          :target-name "export_target"
+                         :opts opts
                          :initialized? (promise)})
    :generator       (->> (rand-int-chunks opts)
                          (map (fn [chunk]
