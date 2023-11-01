@@ -103,32 +103,27 @@
               ; The `value` column will actually store written values.
               ( if (:export-table test)
                 (do
-                  (voltdb/sql-cmd!
-                   (str "CREATE TABLE " table-name " EXPORT TO TARGET " stream-name " on insert (
-                                                 part   INTEGER NOT NULL,
-                                                 value  BIGINT NOT NULL
-                                                 );
-                                                 PARTITION TABLE " table-name " ON COLUMN part;
-                                             "))
-                  (voltdb/sql-cmd!
-                   (str "CREATE PROCEDURE PARTITION ON TABLE " table-name
-                        " COLUMN part FROM CLASS jepsen.procedures.ExportWriteTable;")))
-                (do
-                  (voltdb/sql-cmd! (str
-                                    "CREATE TABLE " table-name " (
+                  (voltdb/sql-cmd! (str "CREATE TABLE " table-name " EXPORT TO TARGET " target-name " on insert (
                                                part   INTEGER NOT NULL,
                                                value  BIGINT NOT NULL
                                                );
-                                               PARTITION TABLE " table-name " ON COLUMN part;
-                               
-                                               CREATE STREAM " stream-name " PARTITION ON COLUMN part
-                                               EXPORT TO TARGET export_target (
-                                                 part INTEGER NOT NULL,
-                                                 value BIGINT NOT NULL
-                                               );"))
-                  (voltdb/sql-cmd!
-                   (str "CREATE PROCEDURE PARTITION ON TABLE " table-name
-                        " COLUMN part FROM CLASS jepsen.procedures.ExportWrite;"))))
+                                    PARTITION TABLE " table-name " ON COLUMN part;"))
+                  (voltdb/sql-cmd! (str "CREATE PROCEDURE PARTITION ON TABLE " table-name
+                                               " COLUMN part FROM CLASS jepsen.procedures.ExportWriteTable;")))
+               
+                (do
+                  (voltdb/sql-cmd! (str "CREATE TABLE " table-name " (
+                                               part   INTEGER NOT NULL,
+                                               value  BIGINT NOT NULL
+                                               );
+                                    PARTITION TABLE " table-name " ON COLUMN part;"))
+                  (voltdb/sql-cmd! (str "CREATE STREAM" stream-name "PARTITION ON COLUMN part
+                                               EXPORT TO TARGET " target-name "(
+                                               part INTEGER NOT NULL,
+                                               value BIGINT NOT NULL
+                                               );")) 
+                  (voltdb/sql-cmd! (str "CREATE PROCEDURE PARTITION ON TABLE " table-name 
+                                               " COLUMN part FROM CLASS jepsen.procedures.ExportWrite;"))))
 
             (info node "tables created")))))
 
