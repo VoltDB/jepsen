@@ -237,7 +237,6 @@
   {:client (map->Client {:table-name  "export_table"
                          :stream-name "export_stream"
                          :target-name "export_target"
-                         :opts opts
                          :initialized? (promise)})
    :generator       (->> (rand-int-chunks opts)
                          (map (fn [chunk]
