@@ -117,7 +117,7 @@
                                                value  BIGINT NOT NULL
                                                );
                                     PARTITION TABLE " table-name " ON COLUMN part;"))
-                  (voltdb/sql-cmd! (str "CREATE STREAM" stream-name "PARTITION ON COLUMN part
+                  (voltdb/sql-cmd! (str "CREATE STREAM " stream-name " PARTITION ON COLUMN part
                                                EXPORT TO TARGET " target-name "(
                                                part INTEGER NOT NULL,
                                                value BIGINT NOT NULL
