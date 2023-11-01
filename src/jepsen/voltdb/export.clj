@@ -138,8 +138,7 @@
                              (long-array (:value op)))
                    (assoc op :type :ok))
         ; Read all data from the table '(table-name)
-        :db-read (let [ _ (info "BZ test :  " test )
-                       v (->>
+        :db-read (let [v (->>
                           (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;"))
                                first
                                :rows
