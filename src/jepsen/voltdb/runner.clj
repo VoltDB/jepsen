@@ -118,6 +118,8 @@
 
    [nil "--strong-reads" "Use stored procedure including a write for all reads"]
 
+   [nil "--export-table" "Use clause table export into target for export testing"]
+
    [nil "--skip-os" "Don't perform OS setup"]
 
    ["-u" "--tarball URL" "URL for the VoltDB tarball to install. May be either HTTP, HTTPS, or a local file on this control node. For instance, --tarball https://foo.com/voltdb-ent.tar.gz, or file://voltdb-ent.tar.gz"
