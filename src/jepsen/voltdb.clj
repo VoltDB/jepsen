@@ -50,6 +50,21 @@
                       (into () (cu/ls-full export-dir))))
       (into []))))
 
+(defn killVolt!
+  "Kill voltDB with the given signal"
+  [node signal] 
+    (info "Killing VoltDB on node " node)
+    (c/su 
+       (if (cu/exists? pidfile)
+         (let [pid (Long/parseLong (c/exec :cat pidfile))]
+           (if (not (cu/daemon-running? pidfile))
+             (info "Proces with id " pid "does NOT exist. Shutdown is not needed")
+             (do
+               (info "Stopping" pidfile)
+               (meh (c/exec :kill signal pid))
+               (meh (c/exec :rm :-rf pidfile)))))
+         (info "The pid file " pidfile "does NOT exist. Shutdown is not needed."))))
+
 (defn os
   "Given OS, plus python & jdk"
   [os]
@@ -327,17 +342,7 @@
     ; Here we repeat this code to print PID
     db/Kill
     (kill! [this test node]
-      (do
-        (info "Killing VoltDB on node " node)
-        (c/su
-         (do
-           ( if (cu/exists? pidfile)
-             (let [pid (Long/parseLong (c/exec :cat pidfile))]
-               (if (not (cu/daemon-running? pidfile))
-                 (info "Proces with id " pid "does NOT exist. Shutdown is not needed")))
-             (info "The pid file " pidfile "does NOT exist. Shutdown is not needed."))
-           ;this cu/stop-daemon! function won't be successfull if pidfile does not contain the right pid for the volt process
-           (cu/stop-daemon! pidfile)))))
+      (killVolt! node :9))
 
     (start! [this test node]
       ;(start-daemon! test))
