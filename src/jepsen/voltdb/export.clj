@@ -84,15 +84,21 @@
   "Parse record for the Stats of export"
   [stats]
   
-  (let [r (:rows stats)
+  (let [ff (first stats)
+        _ (info "BZ first : " ff)
+        r (:rows stats)
         _ (info "BZ rows records : " r)
         tc (map :TUPLE_COUNT r)
         _ (info "BZ tuple count : " tc)
         total (reduce + tc)
-        _ (info "BZ total count : " total)]
-     {:TUPLE_COUNT (->> (:rows stats)
+        _ (info "BZ total count : " total)
+        my_list (map (fn [records] (->> (:rows records)
+                                        (map :TUPLE_COUNT)
+                                        (reduce +))) stats)
+        _ (info "BZ map reduced list : " my_list)]
+     {:TUPLE_COUNT (map (fn [records](->> (:rows records)
                        (map :TUPLE_COUNT)
-                       (reduce +))
+                       (reduce +))) stats)
      :TUPLE_PENDING  (->> (:rows stats)
                           (map :TUPLE_PENDING)
                           (reduce +))}))
