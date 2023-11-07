@@ -80,6 +80,23 @@
   (into [] (flatten (map  download-parse-export! (:nodes test))))
   )
 
+(defn parse-stats-results
+  "Parse record for the Stats of export"
+  [stats]
+  
+  (let [r (:rows stats)
+        _ (info "BZ rows records : " r)
+        tc (map :TUPLE_COUNT r)
+        _ (info "BZ tuple count : " tc)
+        total (reduce + tc)
+        _ (info "BZ total count : " total)]
+     {:TUPLE_COUNT (->> (:rows stats)
+                       (map :TUPLE_COUNT)
+                       (reduce +))
+     :TUPLE_PENDING  (->> (:rows stats)
+                          (map :TUPLE_PENDING)
+                          (reduce +))}))
+
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
                    target-name    ; The name of our export target
@@ -145,7 +162,10 @@
                                (map :VALUE))]
                      (assoc op :type :ok :value v))
         ; Read all exported data from cvs file
-        :export-read (let [v (export-data! test)]
+        :export-read (let [stats (vc/call! conn "@Statistics" "export" )
+                           _ (info "BZ stats : " stats)
+                           _ (info "BZ parse stats : " (parse-stats-results stats))
+                           v (export-data! test)]
                         (assoc op :type :ok :value v))
         )
         (catch Exception e
