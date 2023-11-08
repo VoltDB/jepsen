@@ -82,26 +82,13 @@
 
 (defn parse-stats-results
   "Parse record for the Stats of export"
-  [stats]
-  
-  (let [ff (first stats)
-        _ (info "BZ first : " ff)
-        r (:rows stats)
-        _ (info "BZ rows records : " r)
-        tc (map :TUPLE_COUNT r)
-        _ (info "BZ tuple count : " tc)
-        total (reduce + tc)
-        _ (info "BZ total count : " total)
-        my_list (map (fn [records] (->> (:rows records)
-                                        (map :TUPLE_COUNT)
-                                        (reduce +))) stats)
-        _ (info "BZ map reduced list : " my_list)]
-     {:TUPLE_COUNT (map (fn [records](->> (:rows records)
-                       (map :TUPLE_COUNT)
-                       (reduce +))) stats)
-     :TUPLE_PENDING  (->> (:rows stats)
-                          (map :TUPLE_PENDING)
-                          (reduce +))}))
+  [stats] 
+     {:TUPLE_COUNT (reduce + (map #(->> (:rows %) 
+                                        (map :TUPLE_COUNT) 
+                                        (reduce +)) stats))
+      :TUPLE_PENDING  (reduce + (map #(->> (:rows %)
+                                           (map :TUPLE_PENDING) 
+                                           (reduce +)) stats))})
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
@@ -168,9 +155,8 @@
                                (map :VALUE))]
                      (assoc op :type :ok :value v))
         ; Read all exported data from cvs file
-        :export-read (let [stats (vc/call! conn "@Statistics" "export" )
-                           _ (info "BZ stats : " stats)
-                           _ (info "BZ parse stats : " (parse-stats-results stats))
+        :export-read (let [stats (vc/call! conn "@Statistics" "export" ) 
+                           _ (info "EXPORT STATS: " (parse-stats-results stats))
                            v (export-data! test)]
                         (assoc op :type :ok :value v))
         )
