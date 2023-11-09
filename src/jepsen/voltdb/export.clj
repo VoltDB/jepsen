@@ -102,7 +102,7 @@
    (while (and (pos? @pending) (pos? @trial))
      (if (not= @trial (/ max_wait wait))
        ( Thread/sleep (* wait 1000)))
-     (let [stats (query-export-stats conn)]
+     (let [stats (Long/valueOf (query-export-stats conn))]
        (info "EXPORT STATS " stats)
        (swap! pending (:TUPLE_PENDING stats))
        (swap! trial dec)
