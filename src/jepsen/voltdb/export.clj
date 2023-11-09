@@ -99,13 +99,14 @@
           wait 10         ; how long to wait between requests   
           trial (atom (/ max_wait wait))
          ] 
-   (while (& (pos? @pending) (pos? @trial) ) 
+   (while (and (pos? @pending) (pos? @trial) ) 
      (if (not= @trial (/ max_wait wait))
        ( Thread/sleep (* wait 1000)))
      (let [stats (query-export-stats conn)]
        (info "EXPORT STATS " stats)
-       (swap! pending (:TUPLE_PENDING conn))
-       (swap! trial dec)))))
+       (swap! pending (:TUPLE_PENDING conn)) 
+       (swap! trial dec)
+       (info "BZ trial : " @trial " pending : " @pending)))))
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
