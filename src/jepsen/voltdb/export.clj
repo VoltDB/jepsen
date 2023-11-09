@@ -80,15 +80,32 @@
   (into [] (flatten (map  download-parse-export! (:nodes test))))
   )
 
-(defn parse-stats-results
+(defn query-export-stats
   "Parse record for the Stats of export"
-  [stats] 
-     {:TUPLE_COUNT (reduce + (map #(->> (:rows %) 
-                                        (map :TUPLE_COUNT) 
-                                        (reduce +)) stats))
-      :TUPLE_PENDING  (reduce + (map #(->> (:rows %)
-                                           (map :TUPLE_PENDING) 
-                                           (reduce +)) stats))})
+  [conn]
+  ( let [stats (vc/call! conn "@Statistics" "export")]
+   {:TUPLE_COUNT (reduce + (map #(->> (:rows %)
+                                      (map :TUPLE_COUNT)
+                                      (reduce +)) stats))
+    :TUPLE_PENDING  (reduce + (map #(->> (:rows %)
+                                         (map :TUPLE_PENDING)
+                                         (reduce +)) stats))}))
+
+(defn wait-export-pending
+  "Wait untill pending export records are processed"
+  [conn]
+  ( let [pending (atom 1) ; initial number for pending values. Anything more than 0 works. 
+          max_wait 300    ; max wait in seconds
+          wait 10         ; how long to wait between requests   
+          trial (atom (/ max_wait wait))
+         ] 
+   (while (& (pos? @pending) (pos? @trial) ) 
+     (if (not= @trial (/ max_wait wait))
+       ( Thread/sleep (* wait 1000)))
+     (let [stats (query-export-stats conn)]
+       (info "EXPORT STATS " stats)
+       (swap! pending (:TUPLE_PENDING conn))
+       (swap! trial dec)))))
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
@@ -140,7 +157,7 @@
   (invoke! [_ test op]
     (try
       (case (:f op)
-        ; Write to a random partition
+        ; Write to a rando?m partition
         :write (do (vc/call! conn (if (:export-table test)
                                     "ExportWriteTable"
                                     "ExportWrite")
@@ -155,11 +172,10 @@
                                (map :VALUE))]
                      (assoc op :type :ok :value v))
         ; Read all exported data from cvs file
-        :export-read (let [stats (vc/call! conn "@Statistics" "export" ) 
-                           _ (info "EXPORT STATS: " (parse-stats-results stats))
-                           v (export-data! test)]
-                        (assoc op :type :ok :value v))
-        )
+        :export-read (do (
+                          (wait-export-pending conn)
+                          (let [ v (export-data! test)] 
+                            (assoc op :type :ok :value v))))
         (catch Exception e
               (assoc op :type type, :error op)
               (throw e))))
