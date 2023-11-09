@@ -75,11 +75,6 @@
                  (jepsen.voltdb/list-export-files))))
             )))
 
-(defn export-data!
-  [test]
-  (into [] (flatten (map  download-parse-export! (:nodes test))))
-  )
-
 (defn query-export-stats
   "Parse record for the Stats of export"
   [conn]
@@ -107,6 +102,11 @@
        (swap! pending (Long/valueOf (:TUPLE_PENDING stats)))
        (swap! trial dec)
        (info "BZ trial : " @trial " pending : " @pending)))))
+
+(defn export-data!
+  [test conn]
+  (wait-export-pending conn)
+  (into [] (flatten (map  download-parse-export! (:nodes test)))))
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
@@ -173,10 +173,9 @@
                                (map :VALUE))]
                      (assoc op :type :ok :value v))
         ; Read all exported data from cvs file
-        :export-read (do (
-                          (wait-export-pending conn)
-                          (let [ v (export-data! test)] 
-                            (assoc op :type :ok :value v)))))
+        :export-read (let [v (export-data! test conn)]
+                      (assoc op :type :ok :value v)))
+      
         (catch Exception e
               (assoc op :type type, :error op)
               (throw e))))
