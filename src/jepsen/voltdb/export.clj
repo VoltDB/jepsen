@@ -94,17 +94,17 @@
 (defn wait-export-pending
   "Wait untill pending export records are processed"
   [conn]
-  ( let [pending (atom 1) ; initial number for pending values. Anything more than 0 works. 
+  ( let [pending (atom 1) ; initial number for pending values. Anything more than 0 works.
           max_wait 300    ; max wait in seconds
-          wait 10         ; how long to wait between requests   
+          wait 10         ; how long to wait between requests
           trial (atom (/ max_wait wait))
          ] 
-   (while (and (pos? @pending) (pos? @trial) ) 
+   (while (and (pos? @pending) (pos? @trial))
      (if (not= @trial (/ max_wait wait))
        ( Thread/sleep (* wait 1000)))
      (let [stats (query-export-stats conn)]
        (info "EXPORT STATS " stats)
-       (swap! pending (:TUPLE_PENDING conn)) 
+       (swap! pending (:TUPLE_PENDING conn))
        (swap! trial dec)
        (info "BZ trial : " @trial " pending : " @pending)))))
 
@@ -158,7 +158,7 @@
   (invoke! [_ test op]
     (try
       (case (:f op)
-        ; Write to a rando?m partition
+        ; Write to a random partition
         :write (do (vc/call! conn (if (:export-table test)
                                     "ExportWriteTable"
                                     "ExportWrite")
@@ -176,7 +176,7 @@
         :export-read (do (
                           (wait-export-pending conn)
                           (let [ v (export-data! test)] 
-                            (assoc op :type :ok :value v))))
+                            (assoc op :type :ok :value v)))))
         (catch Exception e
               (assoc op :type type, :error op)
               (throw e))))
