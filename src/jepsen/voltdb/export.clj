@@ -99,7 +99,7 @@
        ( Thread/sleep (* wait 1000)))
      (let [stats (query-export-stats conn)]
        (info "EXPORT STATS " stats)
-       (swap! pending (Long/valueOf (:TUPLE_PENDING stats)))
+       (reset! pending (Long/valueOf (:TUPLE_PENDING stats)))
        (swap! trial dec)
        (info "BZ trial : " @trial " pending : " @pending)))))
 
