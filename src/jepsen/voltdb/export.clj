@@ -82,10 +82,21 @@
 (defn log-export-stats
   [conn]
   (let [stats (query-export-stats conn)
-        rows  (:rows (first stats))]
-    (map #(info "BZ" %) rows)
-    )
-  )
+        rows  (:rows (first stats))
+        rcount (count rows)
+        ii (atom 0)
+        title (format "%10s|%10s|%10s|%10s|%10s" "HOST" "PARTITION" "COUNT" "PENDING" "STATUS")
+        statStr (atom (str "Export Stats log \n" title "\n"))] 
+    ;(map #(info "BZ" %) rows)   ; BZ I have no idea why this "map" iterator does not work. All textbooks on clojure states that it should work.
+                                 ; So instead I had to use "while loop to iterate"
+    (while (< @ii rcount) 
+       (let [row (nth rows @ii)
+             ss (format  "%10s|%10s|%10s|%10s|%10s" (:HOSTNAME row) (:PARTITION_ID row) (:TUPLE_COUNT row) (:TUPLE_PENDING row) (:STATUS row))] 
+         (reset! statStr (str @statStr ss)))
+       (swap! ii inc)
+       (if (not= @ii rcount)
+         (reset! statStr (str @statStr "\n"))))
+    (info @statStr)))
 
 (defn export-stats
   "Parse record for the Export Stats"
@@ -113,10 +124,9 @@
         (info "EXPORT STATS " stats)
         (reset! pending (Long/valueOf (:TUPLE_PENDING stats)))
         (swap! trial dec)))
-    (if (not (pos? @pending)) 
-      (do 
-        (info "Failed to clear pending records")
-        (log-export-stats conn)))))
+   (if (not (pos? @pending))
+     (info "Failed to clear pending records"))
+   (log-export-stats conn)))
 
 (defn export-data!
   [test conn]
