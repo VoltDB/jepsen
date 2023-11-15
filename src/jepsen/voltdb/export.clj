@@ -75,10 +75,63 @@
                  (jepsen.voltdb/list-export-files))))
             )))
 
+(defn query-export-stats
+  [conn]
+  (vc/call! conn "@Statistics" "export"))
+
+(defn log-export-stats
+  [conn]
+  (let [stats (query-export-stats conn)
+        rows  (:rows (first stats))
+        rcount (count rows)
+        ii (atom 0)
+        title (format "%10s|%10s|%10s|%10s|%10s" "HOST" "PARTITION" "COUNT" "PENDING" "STATUS")
+        statStr (atom (str "Export Stats log \n" title "\n"))] 
+    ;(map #(info "BZ" %) rows)   ; BZ I have no idea why this "map" iterator does not work. All textbooks on clojure states that it should work.
+                                 ; So instead I had to use "while loop to iterate"
+    (while (< @ii rcount) 
+       (let [row (nth rows @ii)
+             ss (format  "%10s|%10s|%10s|%10s|%10s" (:HOSTNAME row) (:PARTITION_ID row) (:TUPLE_COUNT row) (:TUPLE_PENDING row) (:STATUS row))] 
+         (reset! statStr (str @statStr ss)))
+       (swap! ii inc)
+       (if (not= @ii rcount)
+         (reset! statStr (str @statStr "\n"))))
+    (info @statStr)))
+
+(defn export-stats
+  "Parse record for the Export Stats"
+  [conn]
+  ( let [stats (query-export-stats conn)]
+   {:TUPLE_COUNT (reduce + (map #(->> (:rows %)
+                                      (map :TUPLE_COUNT)
+                                      (reduce +)) stats))
+    :TUPLE_PENDING  (reduce + (map #(->> (:rows %)
+                                         (map :TUPLE_PENDING)
+                                         (reduce +)) stats))}))
+
+(defn wait-export-pending
+  "Wait until pending export records are processed"
+  [conn]
+  ( let [pending (atom 1) ; initial number for pending values. Anything more than 0 works.
+         max_wait 120    ; max wait in seconds
+         wait 10         ; how long to wait between requests
+         trial (atom (/ max_wait wait))
+         ]
+    (while (and (pos? @pending) (pos? @trial))
+      (if (not= @trial (/ max_wait wait))
+        (Thread/sleep (* wait 1000)))
+      (let [stats (export-stats conn)]
+        (info "EXPORT STATS " stats)
+        (reset! pending (Long/valueOf (:TUPLE_PENDING stats)))
+        (swap! trial dec)))
+   (if (not (pos? @pending))
+     (info "Failed to clear pending records"))
+   (log-export-stats conn)))
+
 (defn export-data!
-  [test]
-  (into [] (flatten (map  download-parse-export! (:nodes test))))
-  )
+  [test conn]
+  (wait-export-pending conn)
+  (into [] (flatten (map  download-parse-export! (:nodes test)))))
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
@@ -145,9 +198,9 @@
                                (map :VALUE))]
                      (assoc op :type :ok :value v))
         ; Read all exported data from cvs file
-        :export-read (let [v (export-data! test)]
-                        (assoc op :type :ok :value v))
-        )
+        :export-read (let [v (export-data! test conn)]
+                        (assoc op :type :ok :value v)))
+      
         (catch Exception e
               (assoc op :type type, :error op)
               (throw e))))
