@@ -41,12 +41,12 @@
 (def export-csv-files "export")
 (def pidfile (str base-dir "/pidfile"))
 
-(defn list-export-files 
+(defn list-export-files
   "List export files for the export tests"
   []
   (let [export-dir (str base-dir "/voltdbroot/" export-csv-dir)]
-    (if (cu/exists? export-dir) 
-      (into [] (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files 
+    (if (cu/exists? export-dir)
+      (into [] (filter #(re-find #".*export.*csv\z" %)     ;here substring "export" is same as export-csv-files
                       (into () (cu/ls-full export-dir))))
       (into []))))
 
@@ -89,10 +89,10 @@
     [:deployment {}
       [:cluster ( let [nodeCount (count (:nodes test)) kfac (:kfactor test) sph (:sitesperhost test)
                 clusterSpec {:hostcount nodeCount
-                :kfactor ( if-not ( < kfac nodeCount ) 
+                :kfactor ( if-not ( < kfac nodeCount )
                                  (throw (Exception. (str "kfactor must be smaller than nodes count = " nodeCount)))
-                            kfac)} ] 
-                ( if (= sph nil) clusterSpec  
+                            kfac)} ]
+                ( if (= sph nil) clusterSpec
                                  (merge clusterSpec {:sitesperhost sph}) ) )]
      [:paths {}
       [:voltdbroot {:path base-dir}]]
@@ -255,7 +255,7 @@
   ; Volt currently plans on JDK8, and we're concerned that running on 17 might
   ; be the cause of a bug. Just in case, we'll target compilation back to 11
   ; (the oldest version you can install on Debian Bookworm easily)
-  (let [r (sh "bash" "-c" "javac -source 11 -target 11 -classpath \"./:./*\" -d ./obj *.java"
+  (let [r (sh "bash" "-c" "javac -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java"
               :dir "procedures/")]
     (when-not (zero? (:exit r))
       (throw (RuntimeException. (str "STDOUT:\n" (:out r)
@@ -311,7 +311,7 @@
       (c/su
        (c/exec :rm :-rf (c/lit (str base-dir "/*"))))
       (vc/kill-reconnect-threads!))
-     
+
     db/LogFiles
     (log-files [db test node]
       (let [export-files (list-export-files)]
@@ -343,9 +343,9 @@
       ;(start-daemon! test))
       (c/su
               ; Before running "start" check if a voltdb process already exists.
-              ; If it exists, The linux "exec" command overwrites pid file while faling to restart volt. 
+              ; If it exists, The linux "exec" command overwrites pid file while faling to restart volt.
               ; Afterwards, the pid file becomes wrong.
-              ; Note that nemesis "kill" starts DB on all nodes, even those where voltdb has not been killed. 
+              ; Note that nemesis "kill" starts DB on all nodes, even those where voltdb has not been killed.
               ; On those nodes we must not restard voltdb.
        (if (and (cu/exists? pidfile) (cu/daemon-running? pidfile))
          (let [pid (Long/parseLong (c/exec :cat pidfile))]
