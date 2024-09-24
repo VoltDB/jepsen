@@ -197,7 +197,7 @@
   (c/sudo username
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:logfile (str base-dir "/log/stdout.log")
+                (cu/start-daemon! {:env {:JAVA_HOME "/opt/oracle_java17" :PATH "/opt/oracle_java17/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"} {:logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
                                   (str base-dir "/bin/voltdb")
