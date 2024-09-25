@@ -1,6 +1,6 @@
 (ns jepsen.voltdb
   "OS and database setup functions, plus some older, currently unused nemeses
-  that should be ported over to voltdb.nemesis."
+  that should be ported over to voltdb.nemesis. see also: https://jepsen-io.github.io/jepsen/"
   (:require [jepsen [core         :as jepsen]
              [db           :as db]
              [control      :as c :refer [|]]
@@ -34,7 +34,7 @@
                               ClientResponse
                               ProcedureCallback)))
 
-(def username "voltdb")
+(def username "jepsenjava17")
 (def base-dir "/tmp/jepsen-voltdb")
 (def client-port 21212)
 (def export-csv-dir "export")
@@ -56,9 +56,11 @@
   (reify os/OS
     (setup! [_ test node]
       (os/setup! os test node)
+      (comment
       (debian/install ["python3" "openjdk-17-jdk-headless"])
       (c/exec :update-alternatives :--install "/usr/bin/python" "python"
               "/usr/bin/python3" 1))
+      )
 
     (teardown! [_ test node]
       (os/teardown! os test node))))
@@ -66,20 +68,23 @@
 (defn install!
   "Install the given tarball URL"
   [node url force?]
-  (c/su
    (if-let [[m path _ filename] (re-find #"^file://((.*/)?([^/]+))$" url)]
      (do ; We're installing a local tarball from the control node; upload it.
        (c/exec :mkdir :-p "/tmp/jepsen")
        (let [remote-path (str "/tmp/jepsen/" filename)]
          (c/upload path remote-path)
+         (info (str "unpacking file://" remote-path "to " url " " base-dir))
          (cu/install-archive! (str "file://" remote-path)
                               base-dir {:force? force?})))
       ; Probably an HTTP URI; just let install-archive handle it
      (cu/install-archive! url base-dir {:force? force?}))
    (c/exec :mkdir (str base-dir "/log"))
+   (comment
    (cu/ensure-user! username)
-   (c/exec :chown :-R (str username ":" username) base-dir)
-   (info "VoltDB unpacked")))
+   (c/exec :chown :-R (str username ":eng") base-dir)
+   (c/exec :chown :-R (str username ":eng") (str "/tmp/jepsen/"))
+   )
+   (info "VoltDB unpacked"))
 
 (defn deployment-xml
   "Generate a deployment.xml string for the given test."
@@ -120,7 +125,6 @@
   "run voltdb init"
   [node]
   (info "Initializing voltdb")
-  (c/sudo username
           (c/cd base-dir
               ; We think there's a bug that breaks sqlcmd if it runs early in
               ; the creation of a fresh DB--it'll log "Cannot invoke
@@ -135,24 +139,24 @@
                           :init
                           :-s init-schema-file
                           :--config (str base-dir "/deployment.xml")
-                          | :tee (str base-dir "/log/stdout.log")))))
+                          :--dir base-dir
+                          :--force
+                          | :tee (str base-dir "/log/init-stdout.log"))))
   (info node "initialized"))
 
 (defn configure!
   "Prepares config files and creates fresh DB."
   [test node]
-  (c/sudo username
           (c/cd base-dir
                 (c/upload (:license test) (str base-dir "/license.xml"))
                 (cu/write-file! (deployment-xml test) "deployment.xml")
                 (init-db! node)
-                (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log")))))
+                (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log"))))
 
 (defn await-log
   "Blocks until voltdb.log contains the given string."
   [line]
   (let [file (str base-dir "/log/volt.log")]
-    (c/sudo username
             (c/cd base-dir
                   ; There used to be a sleep here of *four minutes*. Why? --KRK
                   (c/exec :tail :-n 20 file
@@ -160,7 +164,7 @@
                           ; What is this xargs FOR? What was I thinking seven
                           ; years ago? --KRK, 2023
                           | :xargs (c/lit (str "echo \"\" >> " file
-                                               " \\;")))))))
+                                               " \\;"))))))
 
 (defn await-start
   "Blocks until the node is up, responding to client connections, and
@@ -194,7 +198,6 @@
 (defn start-daemon!
   "Starts the VoltDB daemon."
   [test]
-  (c/sudo username
           (c/cd base-dir
                 (info "Starting voltdb")
                 (cu/start-daemon! {:env {:JAVA_HOME "/opt/oracle_java17" :PATH "/opt/oracle_java17/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
@@ -204,9 +207,10 @@
                                   (str base-dir "/bin/voltdb")
                                   :start
                                   :--count (count (:nodes test))
+                                  :--dir base-dir
                                   :--host (->> (:nodes test)
                                                (map cn/ip)
-                                               (str/join ","))))))
+                                               (str/join ",")))))
 
 (defn recover!
   "Restarts all nodes in the test."
@@ -234,8 +238,7 @@
   "Takes an SQL query and runs it on the local node via sqlcmd"
   [query]
   (c/cd base-dir
-        (c/sudo username
-                (c/exec "bin/sqlcmd" (str "--query=" query)))))
+                (c/exec "bin/sqlcmd" (str "--query=" query))))
 
 (defn snarf-procedure-deps!
   "Downloads voltdb.jar from the current node to procedures/, so we can compile
