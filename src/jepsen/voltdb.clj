@@ -131,11 +131,14 @@
                                  );"
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
-                  (c/exec (str base-dir "/bin/voltdb")
+                  (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                                  "PATH" (System/getenv "PATH")})
+                          (str  base-dir "/bin/voltdb")
                           :init
                           :-s init-schema-file
                           :--config (str base-dir "/deployment.xml")
-                          | :tee (str base-dir "/log/stdout.log")))))
+                          ;| :tee (str base-dir "/log/stdout.log")
+                          ))))
   (info node "initialized"))
 
 (defn configure!
@@ -197,7 +200,9 @@
   (c/sudo username
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:logfile (str base-dir "/log/stdout.log")
+                (cu/start-daemon! {:env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                                          "PATH" (System/getenv "PATH")}
+                                   :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
                                   (str base-dir "/bin/voltdb")
@@ -234,7 +239,9 @@
   [query]
   (c/cd base-dir
         (c/sudo username
-                (c/exec "bin/sqlcmd" (str "--query=" query)))))
+                (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                                "PATH" (System/getenv "PATH")})
+                        "bin/sqlcmd" (str "--query=" query)))))
 
 (defn snarf-procedure-deps!
   "Downloads voltdb.jar from the current node to procedures/, so we can compile
