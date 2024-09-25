@@ -34,12 +34,12 @@
                               ClientResponse
                               ProcedureCallback)))
 
-(def username "jepsenjava17")
 (def base-dir "/tmp/jepsen-voltdb")
 (def client-port 21212)
 (def export-csv-dir "export")
 (def export-csv-files "export")
 (def pidfile (str base-dir "/pidfile"))
+(def java_home "/opt/oracle_java17")
 
 (defn list-export-files
   "List export files for the export tests"
@@ -56,7 +56,7 @@
   (reify os/OS
     (setup! [_ test node]
       (os/setup! os test node)
-      (comment
+      (comment these should already be installed and in the path
       (debian/install ["python3" "openjdk-17-jdk-headless"])
       (c/exec :update-alternatives :--install "/usr/bin/python" "python"
               "/usr/bin/python3" 1))
@@ -79,11 +79,6 @@
       ; Probably an HTTP URI; just let install-archive handle it
      (cu/install-archive! url base-dir {:force? force?}))
    (c/exec :mkdir (str base-dir "/log"))
-   (comment
-   (cu/ensure-user! username)
-   (c/exec :chown :-R (str username ":eng") base-dir)
-   (c/exec :chown :-R (str username ":eng") (str "/tmp/jepsen/"))
-   )
    (info "VoltDB unpacked"))
 
 (defn deployment-xml
@@ -135,8 +130,7 @@
                                  );"
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
-                  (c/exec* (str "JAVA_HOME=/opt/oracle_java17 PATH=/opt/oracle_java17/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bin/voltdb"
-                          " init -s " init-schema-file " --config " base-dir "/deployment.xml --dir " base-dir " --force"
+                  (c/exec* (str "JAVA_HOME=" java_home " bin/voltdb init --schema " init-schema-file " --config " base-dir "/deployment.xml --dir " base-dir " --force"
                           ))))
   (info node "initialized"))
 
@@ -196,7 +190,7 @@
   [test]
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:env {:JAVA_HOME "/opt/oracle_java17" :PATH "/opt/oracle_java17/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
+                (cu/start-daemon! {:env {:JAVA_HOME java_home }
                                    :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
@@ -234,7 +228,7 @@
   "Takes an SQL query and runs it on the local node via sqlcmd"
   [query]
   (c/cd base-dir
-                (c/exec* (str "JAVA_HOME=/opt/oracle_java17 bin/sqlcmd --query=\"" query "\""))))
+                (c/exec* (str "JAVA_HOME=" java_home " bin/sqlcmd --query=\"" query "\""))))
 
 (defn snarf-procedure-deps!
   "Downloads voltdb.jar from the current node to procedures/, so we can compile
