@@ -130,8 +130,14 @@
                                  );"
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
-                  (c/exec* (str "JAVA_HOME=" java_home " bin/voltdb init --schema " init-schema-file " --config " base-dir "/deployment.xml --dir " base-dir " --force"
-                          ))))
+                  (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                                  "PATH" (System/getenv "PATH")})
+                          (str  base-dir "/bin/voltdb")
+                          :init
+                          :-s init-schema-file
+                          :--config (str base-dir "/deployment.xml")
+                          ;| :tee (str base-dir "/log/stdout.log")
+                          )))
   (info node "initialized"))
 
 (defn configure!
@@ -228,7 +234,9 @@
   "Takes an SQL query and runs it on the local node via sqlcmd"
   [query]
   (c/cd base-dir
-                (c/exec* (str "JAVA_HOME=" java_home " bin/sqlcmd --query=\"" query "\""))))
+      (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                      "PATH" (System/getenv "PATH")})
+                      "bin/sqlcmd" (str "--query=" query))))
 
 (defn snarf-procedure-deps!
   "Downloads voltdb.jar from the current node to procedures/, so we can compile
