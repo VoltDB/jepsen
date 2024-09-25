@@ -131,7 +131,7 @@
                                  );"
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
-                  (c/exec (str "JAVA_HOME=/opt/oracle_java17" base-dir "/bin/voltdb")
+                  (c/exec (str base-dir "/bin/voltdb")
                           :init
                           :-s init-schema-file
                           :--config (str base-dir "/deployment.xml")
