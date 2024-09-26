@@ -147,6 +147,8 @@
                 (c/upload (:license test) (str base-dir "/license.xml"))
                 (cu/write-file! (deployment-xml test) "deployment.xml")
                 (init-db! node)
+                (comment this is needed for compatibility between older versions that create a voltdbroot dir )
+                (c/exec :mkdir :-p "log")
                 (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log"))))
 
 (defn await-log
@@ -203,7 +205,6 @@
                                   (str base-dir "/bin/voltdb")
                                   :start
                                   :--count (count (:nodes test))
-                                  :--dir base-dir
                                   :--host (->> (:nodes test)
                                                (map cn/ip)
                                                (str/join ",")))))
@@ -257,7 +258,7 @@
   ; Volt currently plans on JDK8, and we're concerned that running on 17 might
   ; be the cause of a bug. Just in case, we'll target compilation back to 11
   ; (the oldest version you can install on Debian Bookworm easily)
-  (let [r (sh "bash" "-c" "javac -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java"
+  (let [r (sh "bash" "-c" (str "JAVA_HOME=" (System/getenv "JAVA_HOME")) " javac -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java"
               :dir "procedures/")]
     (when-not (zero? (:exit r))
       (throw (RuntimeException. (str "STDOUT:\n" (:out r)
