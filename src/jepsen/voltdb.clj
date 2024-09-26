@@ -39,7 +39,6 @@
 (def export-csv-dir "export")
 (def export-csv-files "export")
 (def pidfile (str base-dir "/pidfile"))
-(def java_home "/opt/oracle_java17")
 
 (defn list-export-files
   "List export files for the export tests"
@@ -198,7 +197,7 @@
   [test]
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:env {:JAVA_HOME java_home }
+                (cu/start-daemon! {:env {:JAVA_HOME (System/getenv "JAVA_HOME") }
                                    :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
