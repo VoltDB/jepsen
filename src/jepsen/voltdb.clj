@@ -55,11 +55,11 @@
   (reify os/OS
     (setup! [_ test node]
       (os/setup! os test node)
-      (comment these should already be installed and in the path
-      (debian/install ["python3" "openjdk-17-jdk-headless"])
-      (c/exec :update-alternatives :--install "/usr/bin/python" "python"
-              "/usr/bin/python3" 1))
-      )
+      ;these should already be installed and in the pat
+      ;(debian/install ["python3" "openjdk-17-jdk-headless"])
+      ;(c/exec :update-alternatives :--install "/usr/bin/python" "python"
+      ;        "/usr/bin/python3" 1))
+      ;)
 
     (teardown! [_ test node]
       (os/teardown! os test node))))
@@ -146,7 +146,7 @@
                 (c/upload (:license test) (str base-dir "/license.xml"))
                 (cu/write-file! (deployment-xml test) "deployment.xml")
                 (init-db! node)
-                (comment this is needed for compatibility between older versions that create a voltdbroot dir )
+                ; this is so jepsen can find the log in a standard place )
                 (c/exec :mkdir :-p "log")
                 (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log"))))
 
