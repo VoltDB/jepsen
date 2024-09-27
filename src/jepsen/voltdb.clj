@@ -1,6 +1,6 @@
 (ns jepsen.voltdb
   "OS and database setup functions, plus some older, currently unused nemeses
-  that should be ported over to voltdb.nemesis."
+  that should be ported over to voltdb.nemesis. see also: https://jepsen-io.github.io/jepsen/"
   (:require [jepsen [core         :as jepsen]
              [db           :as db]
              [control      :as c :refer [|]]
@@ -34,7 +34,6 @@
                               ClientResponse
                               ProcedureCallback)))
 
-(def username "voltdb")
 (def base-dir "/tmp/jepsen-voltdb")
 (def client-port 21212)
 (def export-csv-dir "export")
@@ -56,9 +55,11 @@
   (reify os/OS
     (setup! [_ test node]
       (os/setup! os test node)
-      (debian/install ["python3" "openjdk-17-jdk-headless"])
-      (c/exec :update-alternatives :--install "/usr/bin/python" "python"
-              "/usr/bin/python3" 1))
+      ;(comment these should already be installed and in the path
+      ;(debian/install ["python3" "openjdk-17-jdk-headless"])
+      ;(c/exec :update-alternatives :--install "/usr/bin/python" "python"
+      ;        "/usr/bin/python3" 1))
+      )
 
     (teardown! [_ test node]
       (os/teardown! os test node))))
@@ -66,20 +67,18 @@
 (defn install!
   "Install the given tarball URL"
   [node url force?]
-  (c/su
    (if-let [[m path _ filename] (re-find #"^file://((.*/)?([^/]+))$" url)]
      (do ; We're installing a local tarball from the control node; upload it.
        (c/exec :mkdir :-p "/tmp/jepsen")
        (let [remote-path (str "/tmp/jepsen/" filename)]
          (c/upload path remote-path)
+         (info (str "unpacking file://" remote-path "to " url " " base-dir))
          (cu/install-archive! (str "file://" remote-path)
                               base-dir {:force? force?})))
       ; Probably an HTTP URI; just let install-archive handle it
      (cu/install-archive! url base-dir {:force? force?}))
    (c/exec :mkdir (str base-dir "/log"))
-   (cu/ensure-user! username)
-   (c/exec :chown :-R (str username ":" username) base-dir)
-   (info "VoltDB unpacked")))
+   (info "VoltDB unpacked"))
 
 (defn deployment-xml
   "Generate a deployment.xml string for the given test."
@@ -120,7 +119,6 @@
   "run voltdb init"
   [node]
   (info "Initializing voltdb")
-  (c/sudo username
           (c/cd base-dir
               ; We think there's a bug that breaks sqlcmd if it runs early in
               ; the creation of a fresh DB--it'll log "Cannot invoke
@@ -132,30 +130,30 @@
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
                   (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
-                                  "PATH" (System/getenv "PATH")})
-                          (str  base-dir "/bin/voltdb")
+                                  })
+                          "bin/voltdb"
                           :init
                           :-s init-schema-file
                           :--config (str base-dir "/deployment.xml")
                           ;| :tee (str base-dir "/log/stdout.log")
-                          ))))
+                          )))
   (info node "initialized"))
 
 (defn configure!
   "Prepares config files and creates fresh DB."
   [test node]
-  (c/sudo username
           (c/cd base-dir
                 (c/upload (:license test) (str base-dir "/license.xml"))
                 (cu/write-file! (deployment-xml test) "deployment.xml")
                 (init-db! node)
-                (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log")))))
+                ; this is so jepsen can find the log in a standard place
+                (c/exec :mkdir :-p "log")
+                (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log"))))
 
 (defn await-log
   "Blocks until voltdb.log contains the given string."
   [line]
   (let [file (str base-dir "/log/volt.log")]
-    (c/sudo username
             (c/cd base-dir
                   ; There used to be a sleep here of *four minutes*. Why? --KRK
                   (c/exec :tail :-n 20 file
@@ -163,7 +161,7 @@
                           ; What is this xargs FOR? What was I thinking seven
                           ; years ago? --KRK, 2023
                           | :xargs (c/lit (str "echo \"\" >> " file
-                                               " \\;")))))))
+                                               " \\;"))))))
 
 (defn await-start
   "Blocks until the node is up, responding to client connections, and
@@ -197,20 +195,18 @@
 (defn start-daemon!
   "Starts the VoltDB daemon."
   [test]
-  (c/sudo username
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:env {"JAVA_HOME" (System/getenv "JAVA_HOME")
-                                          "PATH" (System/getenv "PATH")}
+                (cu/start-daemon! {:env {:JAVA_HOME (System/getenv "JAVA_HOME") }
                                    :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
-                                  (str base-dir "/bin/voltdb")
+                                  "bin/voltdb"
                                   :start
                                   :--count (count (:nodes test))
                                   :--host (->> (:nodes test)
                                                (map cn/ip)
-                                               (str/join ","))))))
+                                               (str/join ",")))))
 
 (defn recover!
   "Restarts all nodes in the test."
@@ -238,10 +234,9 @@
   "Takes an SQL query and runs it on the local node via sqlcmd"
   [query]
   (c/cd base-dir
-        (c/sudo username
-                (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
-                                "PATH" (System/getenv "PATH")})
-                        "bin/sqlcmd" (str "--query=" query)))))
+      (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                      })
+                      "bin/sqlcmd" (str "--query=" query))))
 
 (defn snarf-procedure-deps!
   "Downloads voltdb.jar from the current node to procedures/, so we can compile
@@ -262,7 +257,7 @@
   ; Volt currently plans on JDK8, and we're concerned that running on 17 might
   ; be the cause of a bug. Just in case, we'll target compilation back to 11
   ; (the oldest version you can install on Debian Bookworm easily)
-  (let [r (sh "bash" "-c" "javac -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java"
+  (let [r (sh "bash" "-c" (str (System/getenv "JAVA_HOME") "/bin/javac -verbose -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java")
               :dir "procedures/")]
     (when-not (zero? (:exit r))
       (throw (RuntimeException. (str "STDOUT:\n" (:out r)
