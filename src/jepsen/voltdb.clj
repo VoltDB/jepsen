@@ -130,8 +130,8 @@
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
                   (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
-                                  "PATH" (System/getenv "PATH")})
-                          (str  base-dir "/bin/voltdb")
+                                  })
+                          "bin/voltdb"
                           :init
                           :-s init-schema-file
                           :--config (str base-dir "/deployment.xml")
@@ -201,7 +201,7 @@
                                    :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
-                                  (str base-dir "/bin/voltdb")
+                                  "bin/voltdb"
                                   :start
                                   :--count (count (:nodes test))
                                   :--host (->> (:nodes test)
@@ -235,7 +235,7 @@
   [query]
   (c/cd base-dir
       (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
-                      "PATH" (System/getenv "PATH")})
+                      })
                       "bin/sqlcmd" (str "--query=" query))))
 
 (defn snarf-procedure-deps!
@@ -257,7 +257,7 @@
   ; Volt currently plans on JDK8, and we're concerned that running on 17 might
   ; be the cause of a bug. Just in case, we'll target compilation back to 11
   ; (the oldest version you can install on Debian Bookworm easily)
-  (let [r (sh "bash" "-c" (str "JAVA_HOME=" (System/getenv "JAVA_HOME")) " javac -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java"
+  (let [r (sh "bash" "-c" (str (System/getenv "JAVA_HOME") "/bin/javac -verbose -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java")
               :dir "procedures/")]
     (when-not (zero? (:exit r))
       (throw (RuntimeException. (str "STDOUT:\n" (:out r)
