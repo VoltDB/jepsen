@@ -243,12 +243,33 @@
   stored procedures."
   []
   (let [dir  (str base-dir "/voltdb/")
+        f    (first (c/cd dir (cu/ls (c/lit "voltdbclient-*.jar"))))
+        src  (str dir f)
+        dest (io/file (str "procedures/" f))]
+    (when-not (.exists dest)
+      (info "Downloading" f "to" (.getCanonicalPath dest))
+      (c/download src (.getCanonicalPath dest))))
+  (try
+  (let [dir  (str base-dir "/voltdb/")
         f    (first (c/cd dir (cu/ls (c/lit "voltdb-*.jar"))))
         src  (str dir f)
         dest (io/file (str "procedures/" f))]
     (when-not (.exists dest)
       (info "Downloading" f "to" (.getCanonicalPath dest))
-      (c/download src (.getCanonicalPath dest)))))
+      (c/download src (.getCanonicalPath dest))))
+  (catch Exception e#
+   ))
+  ; This is for volt 15 and above. VoltProcedure was moved from voltdb/voltdb-.jar to lib/volt-procedure-api*.jar
+  (try
+  (let [dir  (str base-dir "/lib/")
+        f    (first (c/cd dir (cu/ls (c/lit "volt-procedure-*.jar"))))
+        src  (str dir f)
+        dest (io/file (str "procedures/" f))]
+    (when-not (.exists dest)
+      (info "Downloading" f "to" (.getCanonicalPath dest))
+      (c/download src (.getCanonicalPath dest))))
+   (catch Exception e#
+   )))
 
 (defn build-stored-procedures!
   "Compiles and packages stored procedures in procedures/"
@@ -257,7 +278,7 @@
   ; Volt currently plans on JDK8, and we're concerned that running on 17 might
   ; be the cause of a bug. Just in case, we'll target compilation back to 11
   ; (the oldest version you can install on Debian Bookworm easily)
-  (let [r (sh "bash" "-c" (str (System/getenv "JAVA_HOME") "/bin/javac -verbose -source 8 -target 8 -classpath \"./:./*\" -d ./obj *.java")
+  (let [r (sh "bash" "-c" (str (System/getenv "JAVA_HOME") "/bin/javac -verbose -source 8 -target 8 -classpath " (str base-dir) "/lib/*.jar:" (str base-dir) "/voltdb/*.jar:./:./* -d ./obj *.java")
               :dir "procedures/")]
     (when-not (zero? (:exit r))
       (throw (RuntimeException. (str "STDOUT:\n" (:out r)
