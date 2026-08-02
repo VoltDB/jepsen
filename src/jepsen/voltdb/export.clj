@@ -133,6 +133,43 @@
   (wait-export-pending conn)
   (into [] (flatten (map  download-parse-export! (:nodes test)))))
 
+(defn db-read-values
+  "Reads all values from table-name using the supplied connection."
+  [conn table-name]
+  (->> (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;"))
+       first
+       :rows
+       (map :VALUE)))
+
+(defn db-read-live
+  "Reads all values from table-name against a node that is currently alive.
+
+  The per-worker client (jepsen.voltdb.client/connect) is deliberately NOT
+  topology-change aware, so it is pinned to a single node. When VoltDB's own
+  partition detection shuts that node down during the run, the pinned
+  connection returns nothing and the final consistency read spuriously reports
+  every committed write as lost. We therefore discover which nodes are still
+  alive and read from the first one that answers, so the final read reflects
+  the surviving cluster rather than a dead node."
+  [test table-name]
+  (let [live (vc/up-nodes test)]
+    (when (empty? live)
+      (throw (IllegalStateException. "No live VoltDB nodes available for db-read")))
+    (loop [[node & more] live]
+      (let [result (try
+                     {:ok (let [conn (vc/connect node test)]
+                            (try
+                              (doall (db-read-values conn table-name))
+                              (finally (vc/close! conn))))}
+                     (catch Exception e
+                       (warn e "db-read against" node "failed")
+                       {:error e}))]
+        (if (contains? result :ok)
+          (:ok result)
+          (if (seq more)
+            (recur more)
+            (throw (:error result))))))))
+
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
                    target-name    ; The name of our export target
@@ -190,12 +227,10 @@
                              (rand-int 1000)
                              (long-array (:value op)))
                    (assoc op :type :ok))
-        ; Read all data from the table '(table-name)
-        :db-read (let [v (->>
-                          (vc/ad-hoc! conn (str "SELECT value FROM " table-name " ORDER BY value;"))
-                               first
-                               :rows
-                               (map :VALUE))]
+        ; Read all data from the table '(table-name). We read from a live node
+        ; rather than the pinned `conn`, which may have been shut down by
+        ; partition detection during the run (see db-read-live).
+        :db-read (let [v (db-read-live test table-name)]
                      (assoc op :type :ok :value v))
         ; Read all exported data from cvs file
         :export-read (let [v (export-data! test conn)]
