@@ -290,32 +290,74 @@
                              (mapcat :value)
                              (into (sorted-set)))
             _ (info "export-read values count: " (count export-read))
+            ; How many :db-read ops actually succeeded? db-read is the
+            ; reference set every other metric is diffed against, so if the
+            ; final :db-read op failed (e.g. client timeout) the set is empty
+            ; and *every* confirmed write looks "lost" while *every* exported
+            ; row looks "phantom" -- a total-loss false positive. Guard it.
+            ; See ENG-29721.
+            db-read-ops (->> history
+                             h/oks
+                             (h/filter-f :db-read)
+                             count)
+            db-read-ok? (pos? db-read-ops)
+            ; db-read-based view: only meaningful when a db-read succeeded, so
+            ; that the persistent table can serve as the source of truth for
+            ; what actually committed. nil when unavailable (count => 0).
             ; Did we lose any writes confirmed to the client?
-            lost-transactions (set/difference client-ok db-read)
+            lost-transactions (when db-read-ok? (set/difference client-ok db-read))
             _ (info "lost-transaction count: " (count lost-transactions))
             ; Did we loose transaction in export-read
-            lost-export (set/difference db-read export-read)
+            lost-export (when db-read-ok? (set/difference db-read export-read))
             _ (info "lost-export count: " (count lost-export))
             ; Writes present in export but missing from DB
-            phantom-export (set/difference export-read db-read)
+            phantom-export (when db-read-ok? (set/difference export-read db-read))
             _ (info "phantom-export count: " (count phantom-export))
-            ; Writes present in the export but the client thought they failed 
-            exported-but-client-failed (set/intersection export-read client-failed) ] 
+            ; db-read-independent safety checks against the client history,
+            ; usable even when the DB reference read is unavailable:
+            ; committed writes that never made it into the export...
+            missing-from-export (set/difference client-ok export-read)
+            _ (info "missing-from-export count: " (count missing-from-export))
+            ; ...and definitely-failed writes that nonetheless showed up in the
+            ; export. Indeterminate (:info) writes are legitimately allowed to
+            ; appear in the export, so they are intentionally NOT flagged here.
+            exported-but-client-failed (set/intersection export-read client-failed)
+            _ (when-not db-read-ok?
+                (warn "No successful :db-read op in history; cannot use the DB"
+                      "table as a reference. Falling back to client-vs-export"
+                      "checks only; result is :unknown unless those find a real"
+                      "violation. See ENG-29721."))
+            ; A genuine violation is: a committed write missing from export, a
+            ; failed write present in export, or (only when we have a reliable
+            ; db-read) any db-read-based discrepancy.
+            real-violation? (boolean
+                              (or (seq missing-from-export)
+                                  (seq exported-but-client-failed)
+                                  (and db-read-ok?
+                                       (or (seq lost-transactions)
+                                           (seq lost-export)
+                                           (seq phantom-export)))))]
 
-        {:valid? (and (empty? lost-transactions)
-                      (empty? phantom-export) 
-                      (empty? lost-export))
+        {:valid? (cond
+                   real-violation?   false
+                   ; DB reference read unavailable: client-vs-export was
+                   ; consistent, but we could not run the full check.
+                   (not db-read-ok?) :unknown
+                   :else             true)
+         :db-read-ok?                      db-read-ok?
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
          :db-read-count                    (count db-read)
          :export-read-count                (count export-read)
+         :missing-from-export-count        (count missing-from-export)
          :lost-transaction-count           (count lost-transactions)
          :lost-export-count                (count lost-export)
          :phantom-export-count             (count phantom-export)
          :exported-but-client-failed-count (count exported-but-client-failed)
+         :missing-from-export              missing-from-export
          ;:lost-transactions                lost-transactions
          ;:lost_export                      lost-export
-         :phantom-export                   phantom-export
+         ;:phantom-export                   phantom-export
          ;:exported-but-client-failed       exported-but-client-failed
          }))))
 
