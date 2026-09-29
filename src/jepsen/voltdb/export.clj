@@ -128,9 +128,44 @@
      (info "Failed to clear pending records"))
    (log-export-stats conn)))
 
+(defn with-live-conn
+  "Calls (f conn) with a connection to a node that is currently alive, and
+  returns its result. `what` names the operation, for logging.
+
+  The per-worker client (jepsen.voltdb.client/connect) is deliberately NOT
+  topology-change aware, so it is pinned to a single node. When VoltDB's own
+  partition detection shuts that node down during the run, the pinned
+  connection is dead and the final reads fail, which the checker would
+  otherwise see as every committed write being lost. We therefore discover
+  which nodes are still alive and use the first one that answers, so the final
+  reads reflect the surviving cluster rather than a dead node. See ENG-29692,
+  ENG-30047."
+  [test what f]
+  (let [live (vc/up-nodes test)]
+    (when (empty? live)
+      (throw (IllegalStateException.
+               (str "No live VoltDB nodes available for " what))))
+    (loop [[node & more] live]
+      (let [result (try
+                     {:ok (let [conn (vc/connect node test)]
+                            (try
+                              (f conn)
+                              (finally (vc/close! conn))))}
+                     (catch Exception e
+                       (warn e what "against" node "failed")
+                       {:error e}))]
+        (if (contains? result :ok)
+          (:ok result)
+          (if (seq more)
+            (recur more)
+            (throw (:error result))))))))
+
 (defn export-data!
-  [test conn]
-  (wait-export-pending conn)
+  "Waits for pending export to drain (asking a live node, not the pinned one),
+  then downloads the export files from every node over SSH. The files are on
+  disk, so a node whose VoltDB is down still contributes its files."
+  [test]
+  (with-live-conn test "export-read" wait-export-pending)
   (into [] (flatten (map  download-parse-export! (:nodes test)))))
 
 (defn db-read-values
@@ -143,45 +178,39 @@
 
 (defn db-read-live
   "Reads all values from table-name against a node that is currently alive.
-
-  The per-worker client (jepsen.voltdb.client/connect) is deliberately NOT
-  topology-change aware, so it is pinned to a single node. When VoltDB's own
-  partition detection shuts that node down during the run, the pinned
-  connection returns nothing and the final consistency read spuriously reports
-  every committed write as lost. We therefore discover which nodes are still
-  alive and read from the first one that answers, so the final read reflects
-  the surviving cluster rather than a dead node."
+  See with-live-conn."
   [test table-name]
-  (let [live (vc/up-nodes test)]
-    (when (empty? live)
-      (throw (IllegalStateException. "No live VoltDB nodes available for db-read")))
-    (loop [[node & more] live]
-      (let [result (try
-                     {:ok (let [conn (vc/connect node test)]
-                            (try
-                              (doall (db-read-values conn table-name))
-                              (finally (vc/close! conn))))}
-                     (catch Exception e
-                       (warn e "db-read against" node "failed")
-                       {:error e}))]
-        (if (contains? result :ok)
-          (:ok result)
-          (if (seq more)
-            (recur more)
-            (throw (:error result))))))))
+  (with-live-conn test "db-read"
+    (fn [conn] (doall (db-read-values conn table-name)))))
+
+(defn conn!
+  "Returns this client's connection to its pinned node, (re)connecting if we
+  don't have one yet. Returns nil, rather than throwing, if the node can't be
+  reached."
+  [{:keys [conn node]} test]
+  (or @conn
+      (try
+        (reset! conn (vc/connect node test))
+        (catch Exception e
+          (warn "Could not connect to" node ":" (.getMessage e))
+          nil))))
 
 (defrecord Client [table-name     ; The name of the table we write to
                    stream-name    ; The name of the stream we write to
                    target-name    ; The name of our export target
-                   conn           ; Our VoltDB client connection
+                   conn           ; Atom of our VoltDB client connection, or nil
                    node           ; The node we're talking to
                    initialized?   ; Have we performed one-time initialization?
                    ]
   client/Client
+  ; open! must not throw when the pinned node is down. If it does, Jepsen
+  ; fails every op on this worker with [:no-client ...] before invoke! runs,
+  ; including the final :db-read and :export-read, which don't need the
+  ; pinned node at all. So we connect lazily in conn! instead. See ENG-30047.
   (open! [this test node]
-    (assoc this
-           :conn (vc/connect node test)
-           :node node))
+    (let [this (assoc this :conn (atom nil) :node node)]
+      (conn! this test)
+      this))
 
   (setup! [_ test]
     (when (deliver initialized? true)
@@ -217,33 +246,32 @@
 
             (info node "tables created")))))
 
-  (invoke! [_ test op]
-    (try
-      (case (:f op)
-        ; Write to a random partition
-        :write (do (vc/call! conn (if (:export-table test)
-                                    "ExportWriteTable"
-                                    "ExportWrite")
+  (invoke! [this test op]
+    (case (:f op)
+      ; Write to a random partition. With no connection the write was never
+      ; sent, so it definitely failed.
+      :write (if-let [c (conn! this test)]
+               (do (vc/call! c (if (:export-table test)
+                                 "ExportWriteTable"
+                                 "ExportWrite")
                              (rand-int 1000)
                              (long-array (:value op)))
                    (assoc op :type :ok))
-        ; Read all data from the table '(table-name). We read from a live node
-        ; rather than the pinned `conn`, which may have been shut down by
-        ; partition detection during the run (see db-read-live).
-        :db-read (let [v (db-read-live test table-name)]
-                     (assoc op :type :ok :value v))
-        ; Read all exported data from cvs file
-        :export-read (let [v (export-data! test conn)]
-                        (assoc op :type :ok :value v)))
-      
-        (catch Exception e
-              (assoc op :type type, :error op)
-              (throw e))))
+               (assoc op :type :fail, :error [:no-conn node]))
+      ; Read all data from the table '(table-name). We read from a live node
+      ; rather than the pinned `conn`, which may have been shut down by
+      ; partition detection during the run (see with-live-conn).
+      :db-read (let [v (db-read-live test table-name)]
+                 (assoc op :type :ok :value v))
+      ; Read all exported data from cvs file
+      :export-read (let [v (export-data! test)]
+                     (assoc op :type :ok :value v))))
 
   (teardown! [_ test])
 
   (close! [_ test]
-    (vc/close! conn)))
+    (when-let [c @conn]
+      (vc/close! c))))
 
 (defn rand-int-chunks
   "A lazy sequence of sequential integers grouped into randomly sized small
@@ -296,55 +324,75 @@
             ; and *every* confirmed write looks "lost" while *every* exported
             ; row looks "phantom" -- a total-loss false positive. Guard it.
             ; See ENG-29721.
-            db-read-ops (->> history
+            db-read-ok? (->> history
                              h/oks
                              (h/filter-f :db-read)
-                             count)
-            db-read-ok? (pos? db-read-ops)
-            ; db-read-based view: only meaningful when a db-read succeeded, so
-            ; that the persistent table can serve as the source of truth for
-            ; what actually committed. nil when unavailable (count => 0).
+                             seq
+                             boolean)
+            ; The same holds for :export-read, the reference set for everything
+            ; export-side: a failed export read leaves an empty set, and every
+            ; committed write looks "missing from export". See ENG-30047.
+            ; This deliberately keys on the op succeeding, not on the set being
+            ; non-empty: a successful read that finds nothing is real loss.
+            export-read-ok? (->> history
+                                 h/oks
+                                 (h/filter-f :export-read)
+                                 seq
+                                 boolean)
+            ; Each metric is only computed when every read it depends on
+            ; succeeded; nil otherwise (count => 0).
             ; Did we lose any writes confirmed to the client?
-            lost-transactions (when db-read-ok? (set/difference client-ok db-read))
+            lost-transactions (when db-read-ok?
+                                (set/difference client-ok db-read))
             _ (info "lost-transaction count: " (count lost-transactions))
             ; Did we loose transaction in export-read
-            lost-export (when db-read-ok? (set/difference db-read export-read))
+            lost-export (when (and db-read-ok? export-read-ok?)
+                          (set/difference db-read export-read))
             _ (info "lost-export count: " (count lost-export))
             ; Writes present in export but missing from DB
-            phantom-export (when db-read-ok? (set/difference export-read db-read))
+            phantom-export (when (and db-read-ok? export-read-ok?)
+                             (set/difference export-read db-read))
             _ (info "phantom-export count: " (count phantom-export))
             ; db-read-independent safety checks against the client history,
             ; usable even when the DB reference read is unavailable:
             ; committed writes that never made it into the export...
-            missing-from-export (set/difference client-ok export-read)
+            missing-from-export (when export-read-ok?
+                                  (set/difference client-ok export-read))
             _ (info "missing-from-export count: " (count missing-from-export))
             ; ...and definitely-failed writes that nonetheless showed up in the
             ; export. Indeterminate (:info) writes are legitimately allowed to
             ; appear in the export, so they are intentionally NOT flagged here.
-            exported-but-client-failed (set/intersection export-read client-failed)
-            _ (when-not db-read-ok?
-                (warn "No successful :db-read op in history; cannot use the DB"
-                      "table as a reference. Falling back to client-vs-export"
-                      "checks only; result is :unknown unless those find a real"
-                      "violation. See ENG-29721."))
-            ; A genuine violation is: a committed write missing from export, a
-            ; failed write present in export, or (only when we have a reliable
-            ; db-read) any db-read-based discrepancy.
+            exported-but-client-failed (when export-read-ok?
+                                         (set/intersection export-read
+                                                           client-failed))
+            ; Why we couldn't run the full check, if we couldn't.
+            unknown-reasons (cond-> []
+                              (not db-read-ok?)
+                              (conj :no-successful-db-read)
+                              (not export-read-ok?)
+                              (conj :no-successful-export-read))
+            _ (when (seq unknown-reasons)
+                (warn "Final reads failed:" unknown-reasons "- skipping the"
+                      "checks that depend on them; result is :unknown unless"
+                      "the remaining checks find a real violation."
+                      "See ENG-29721, ENG-30047."))
+            ; A genuine violation is any discrepancy we were able to compute.
             real-violation? (boolean
                               (or (seq missing-from-export)
                                   (seq exported-but-client-failed)
-                                  (and db-read-ok?
-                                       (or (seq lost-transactions)
-                                           (seq lost-export)
-                                           (seq phantom-export)))))]
+                                  (seq lost-transactions)
+                                  (seq lost-export)
+                                  (seq phantom-export)))]
 
         {:valid? (cond
-                   real-violation?   false
-                   ; DB reference read unavailable: client-vs-export was
+                   real-violation?        false
+                   ; A reference read is unavailable: what we could check was
                    ; consistent, but we could not run the full check.
-                   (not db-read-ok?) :unknown
-                   :else             true)
+                   (seq unknown-reasons)  :unknown
+                   :else                  true)
+         :unknown-reasons                  unknown-reasons
          :db-read-ok?                      db-read-ok?
+         :export-read-ok?                  export-read-ok?
          :client-ok-count                  (count client-ok)
          :client-failed-count              (count client-failed)
          :db-read-count                    (count db-read)
@@ -361,6 +409,21 @@
          ;:exported-but-client-failed       exported-but-client-failed
          }))))
 
+(defn final-read
+  "A generator for the final read op f, retried until it succeeds.
+
+  A map on its own is a one-shot generator, so (gen/until-ok {:f f}) makes a
+  single attempt; it needs gen/repeat to retry. A connection refused right
+  after the nemesis stops is transient, so we retry up to 10 times, 10s apart.
+  Pinned to one thread so attempts run one at a time. See ENG-30047."
+  [f]
+  (->> {:f f}
+       gen/repeat
+       (gen/delay 10)
+       (gen/limit 10)
+       gen/until-ok
+       (gen/on-threads #{0})))
+
 (defn workload
   "Takes CLI options and constructs a workload map."
   [opts]
@@ -371,7 +434,6 @@
    :generator       (->> (rand-int-chunks opts)
                          (map (fn [chunk]
                                 {:f :write, :value chunk})))
-   :final-generator (gen/phases
-                      [(gen/until-ok {:f :db-read})
-                       (gen/until-ok {:f :export-read})])
+   :final-generator (gen/phases (final-read :db-read)
+                                (final-read :export-read))
    :checker (checker)})
