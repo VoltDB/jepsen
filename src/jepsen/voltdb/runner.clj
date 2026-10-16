@@ -48,7 +48,35 @@
 (def nemeses
   "All nemesis faults we know about."
   ; TODO: add bitflip/truncate
-  #{:partition :clock :pause :kill :rando :cluster-restart})
+  #{:partition :packet :clock :pause :kill :rando :cluster-restart})
+
+(def packet-behaviors
+  "Named tc-netem behaviours for --packet-behaviors, each a map as
+  jepsen.net/all-packet-behaviors expects. Unspecified fields take jepsen's
+  defaults (50 ms +/- 10 ms normal-distributed delay, 20% loss etc.). The
+  cluster's 2 s heartbeat timeout is what these are aimed at: a clean
+  partition is binary, these are the slow, lossy, reordering networks that
+  make membership flap."
+  {:delay     {:delay {}}
+   :slow      {:delay {:time :500ms :jitter :250ms}}
+   :loss      {:loss {}}
+   :corrupt   {:corrupt {:percent :5%}}
+   :duplicate {:duplicate {}}
+   :reorder   {:reorder {}}
+   :rate      {:rate {:rate :1mbit}}
+   :mixed     {:delay {} :loss {:percent :5%} :duplicate {:percent :5%}}})
+
+(defn parse-behaviors
+  "Takes a comma-separated list of packet-behaviors names and returns a vector
+  of behaviour maps."
+  [spec]
+  (->> (str/split spec #",")
+       (remove str/blank?)
+       (mapv (fn [b]
+               (or (get packet-behaviors (keyword b))
+                   (throw (IllegalArgumentException.
+                            (str "Unknown packet behaviour " b ", want one of "
+                                 (str/join ", " (map name (keys packet-behaviors)))))))))))
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults."
@@ -76,6 +104,8 @@
    [:rando :pause]
    [:rando :clock]
    [:rando :kill :partition]
+   [:packet]
+   [:packet :kill]
    [:cluster-restart]])
 
 (defn parse-nemesis-spec
@@ -146,6 +176,17 @@
     :default 600
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
+
+   [nil "--packet-targets SPECS" "Comma-separated node specs for packet faults: one, minority-third, majority, majorities-ring, all."
+    :default [:one :minority-third :majority]
+    :default-desc "one,minority-third,majority"
+    :parse-fn parse-targets
+    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+
+   [nil "--packet-behaviors NAMES" "Comma-separated tc-netem behaviours the packet nemesis picks from: delay, slow, loss, corrupt, duplicate, reorder, rate, mixed."
+    :default (mapv packet-behaviors [:delay :slow :loss :corrupt :duplicate :reorder :mixed])
+    :default-desc "delay,slow,loss,corrupt,duplicate,reorder,mixed"
+    :parse-fn parse-behaviors]
 
    [nil "--nemesis-interval SECONDS" "How long between nemesis operations, on average, for each class of fault?"
     ; In my testing, Volt often takes 20 seconds or so just to start up--we
@@ -239,6 +280,8 @@
                    :partition {:targets (:partition-targets opts)}
                    :pause     {:targets (:pause-targets opts)}
                    :kill      {:targets (:kill-targets opts)}
+                   :packet    {:targets   (:packet-targets opts)
+                               :behaviors (:packet-behaviors opts)}
 
                    :cluster-restart-down-time (:cluster-restart-down-time opts)
                    :await-up-timeout (:await-up-timeout opts)
