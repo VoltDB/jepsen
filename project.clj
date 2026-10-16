@@ -15,6 +15,10 @@
                  [org.clojure/data.csv "1.0.1"]
                  ]
   :jvm-opts ["-Xmx8g"
+             ; Compiling the runner loads elle.viz, which touches the AWT
+             ; toolkit at load time and throws HeadlessException on a server
+             ; with no display unless the JVM is told it is headless.
+             "-Djava.awt.headless=true"
              "-XX:MaxInlineLevel=32"
              "-server"
              "--add-opens" "java.base/java.lang=ALL-UNNAMED"
