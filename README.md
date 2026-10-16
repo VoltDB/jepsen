@@ -7,6 +7,17 @@ Jepsen tests for voltdb.
 You'll need a VoltDB tarball to install, either as a local file or an HTTP URL.
 You'll also need a license file in this directory, by default called `license.xml`.
 
+The control node (where `lein` runs) needs JDK 21 or newer: this project
+depends on jepsen 0.3.14, and jepsen 0.3.10+ requires JDK 21. The DB nodes can
+stay on the JDK the server kit is qualified for (17). Set `VOLT_JAVA_HOME` to
+the JDK path to use on the DB nodes for `voltdb init`, `voltdb start` and
+`sqlcmd`; it defaults to the control node's `JAVA_HOME`.
+
+```
+export JAVA_HOME=/opt/oracle_java21
+export VOLT_JAVA_HOME=/opt/oracle_java17
+```
+
 To run a single-key linearizability test with network partitions:
 
 ```

@@ -40,6 +40,15 @@
 (def export-csv-files "export")
 (def pidfile (str base-dir "/pidfile"))
 
+(defn db-java-home
+  "JAVA_HOME to use for the VoltDB processes on the DB nodes (voltdb init,
+  voltdb start, sqlcmd). Jepsen 0.3.10+ needs JDK 21 on the control node, but
+  the server kits are qualified on JDK 17, so the two are decoupled: set
+  VOLT_JAVA_HOME for the DB side; it defaults to the control node's JAVA_HOME."
+  []
+  (or (System/getenv "VOLT_JAVA_HOME")
+      (System/getenv "JAVA_HOME")))
+
 (defn list-export-files
   "List export files for the export tests"
   []
@@ -129,7 +138,7 @@
                                  );"
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
-                  (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                  (c/exec (c/env {"JAVA_HOME" (db-java-home)
                                   })
                           "bin/voltdb"
                           :init
@@ -197,7 +206,7 @@
   [test]
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:env {:JAVA_HOME (System/getenv "JAVA_HOME") }
+                (cu/start-daemon! {:env {:JAVA_HOME (db-java-home)}
                                    :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
@@ -234,7 +243,7 @@
   "Takes an SQL query and runs it on the local node via sqlcmd"
   [query]
   (c/cd base-dir
-      (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+      (c/exec (c/env {"JAVA_HOME" (db-java-home)
                       })
                       "bin/sqlcmd" (str "--query=" query))))
 
@@ -275,9 +284,10 @@
   "Compiles and packages stored procedures in procedures/"
   []
   (sh "mkdir" "obj" :dir "procedures/")
-  ; Volt currently plans on JDK8, and we're concerned that running on 17 might
-  ; be the cause of a bug. Just in case, we'll target compilation back to 11
-  ; (the oldest version you can install on Debian Bookworm easily)
+  ; javac runs on the control node (JDK 21 since jepsen 0.3.10). The
+  ; procedures are still emitted as Java 8 class files so the same jar loads
+  ; into any server kit the matrix runs, including the LTS 13.3.x line.
+  ; JDK 21 accepts -source/-target 8 with a deprecation warning.
   (let [r (sh "bash" "-c" (str (System/getenv "JAVA_HOME") "/bin/javac -verbose -source 8 -target 8 -classpath " (str base-dir) "/lib/*.jar:" (str base-dir) "/voltdb/*.jar:./:./* -d ./obj *.java")
               :dir "procedures/")]
     (when-not (zero? (:exit r))
