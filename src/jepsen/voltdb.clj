@@ -93,7 +93,10 @@
   [node url force?]
    (if-let [[m path _ filename] (re-find #"^file://((.*/)?([^/]+))$" url)]
      (do ; We're installing a local tarball from the control node; upload it.
-       (c/exec :mkdir :-p "/tmp/jepsen")
+       ; A root-owned /tmp/jepsen left behind by an earlier run makes the
+       ; upload fail with Permission denied, so make the directory ours.
+       (c/su (c/exec :mkdir :-p "/tmp/jepsen")
+             (c/exec :chmod "1777" "/tmp/jepsen"))
        (let [remote-path (str "/tmp/jepsen/" filename)]
          (c/upload path remote-path)
          (info (str "unpacking file://" remote-path "to " url " " base-dir))
