@@ -26,6 +26,10 @@
              "--add-opens" "java.base/sun.net.www.protocol.file=ALL-UNNAMED"
              "--add-opens" "java.base/sun.net.www.protocol.ftp=ALL-UNNAMED"
              "--add-opens" "java.base/sun.net.www.protocol.jar=ALL-UNNAMED"]
+  ; Leiningen 2.9.1, the version on the lab agents, runs out of memory in
+  ; its pedantic dependency-graph check (all-paths) on this dependency tree
+  ; and never reaches the test; 2.9.4+ rewrote that check. Skip it.
+  :pedantic? false
   :main jepsen.voltdb.runner
   :aot  [jepsen.voltdb.runner
          clojure.tools.logging.impl])
