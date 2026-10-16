@@ -247,38 +247,30 @@
                       })
                       "bin/sqlcmd" (str "--query=" query))))
 
+(defn download-first-jar!
+  "Downloads the first jar in dir whose name matches re to procedures/, if
+  there is one and we don't have it yet. jepsen 0.3.14's cu/ls takes a plain
+  directory, so the glob is applied here."
+  [dir re]
+  (when-let [f (->> (cu/ls dir)
+                    (filter #(re-find re %))
+                    sort
+                    first)]
+    (let [src  (str dir "/" f)
+          dest (io/file (str "procedures/" f))]
+      (when-not (.exists dest)
+        (info "Downloading" f "to" (.getCanonicalPath dest))
+        (c/download src (.getCanonicalPath dest))))))
+
 (defn snarf-procedure-deps!
-  "Downloads voltdb.jar from the current node to procedures/, so we can compile
-  stored procedures."
+  "Downloads the client jar, and the jar holding VoltProcedure, from the
+  current node to procedures/, so we can compile stored procedures. Before
+  15.0 VoltProcedure lived in voltdb/voltdb-*.jar; from 15.0 it is in
+  lib/volt-procedure-*.jar. Whichever is present is taken."
   []
-  (let [dir  (str base-dir "/voltdb/")
-        f    (first (c/cd dir (cu/ls (c/lit "voltdbclient-*.jar"))))
-        src  (str dir f)
-        dest (io/file (str "procedures/" f))]
-    (when-not (.exists dest)
-      (info "Downloading" f "to" (.getCanonicalPath dest))
-      (c/download src (.getCanonicalPath dest))))
-  (try
-  (let [dir  (str base-dir "/voltdb/")
-        f    (first (c/cd dir (cu/ls (c/lit "voltdb-*.jar"))))
-        src  (str dir f)
-        dest (io/file (str "procedures/" f))]
-    (when-not (.exists dest)
-      (info "Downloading" f "to" (.getCanonicalPath dest))
-      (c/download src (.getCanonicalPath dest))))
-  (catch Exception e#
-   ))
-  ; This is for volt 15 and above. VoltProcedure was moved from voltdb/voltdb-.jar to lib/volt-procedure-api*.jar
-  (try
-  (let [dir  (str base-dir "/lib/")
-        f    (first (c/cd dir (cu/ls (c/lit "volt-procedure-*.jar"))))
-        src  (str dir f)
-        dest (io/file (str "procedures/" f))]
-    (when-not (.exists dest)
-      (info "Downloading" f "to" (.getCanonicalPath dest))
-      (c/download src (.getCanonicalPath dest))))
-   (catch Exception e#
-   )))
+  (download-first-jar! (str base-dir "/voltdb") #"^voltdbclient-.*\.jar$")
+  (download-first-jar! (str base-dir "/voltdb") #"^voltdb-.*\.jar$")
+  (download-first-jar! (str base-dir "/lib")    #"^volt-procedure-.*\.jar$"))
 
 (defn build-stored-procedures!
   "Compiles and packages stored procedures in procedures/"
