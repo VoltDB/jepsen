@@ -12,6 +12,7 @@
              [time :as nt]]
             [jepsen.voltdb :as voltdb]
             [jepsen.voltdb [client :as vc]]
+            [clojure.set :as set]
             [slingshot.slingshot :refer [try+ throw+]])
   (:import (org.voltdb.client ClientResponse)))
 
@@ -107,6 +108,49 @@
               :fs [:rando]
               :color "#E9A0E6"}}}))
 
+(defn await-up-nemesis
+  "A nemesis with no generator of its own; the runner's recovery phase sends it
+  {:f :await-up} after starting every node, and it blocks until each node
+  answers client connections again, or the timeout (:await-up-timeout opts,
+  default 600 s) elapses. Returns the nodes still down, if any, as the op
+  value, so a failed recovery shows up in the history rather than as a final
+  read against a dead node."
+  [opts]
+  (reify n/Nemesis
+    (setup! [this test] this)
+
+    (invoke! [this test op]
+      (assert (= :await-up (:f op)))
+      (let [timeout-ms (* 1000 (:await-up-timeout opts 600))
+            deadline   (+ (System/nanoTime) (* timeout-ms 1000000))
+            nodes      (set (:nodes test))]
+        (loop []
+          (let [down (set/difference nodes (set (vc/up-nodes test)))]
+            (cond (empty? down)
+                  (assoc op :value :all-up)
+
+                  (< deadline (System/nanoTime))
+                  (do (warn "Nodes still down after recovery:" down)
+                      (assoc op :value {:still-down down}))
+
+                  :else
+                  (do (info "Waiting for" down "to come up")
+                      (Thread/sleep 5000)
+                      (recur)))))))
+
+    (teardown! [this test])
+
+    n/Reflection
+    (fs [_] #{:await-up})))
+
+(defn await-up-package
+  "Package wrapping await-up-nemesis. Always included: the runner's recovery
+  phase depends on it regardless of which faults are enabled."
+  [opts]
+  {:nemesis (await-up-nemesis opts)
+   :generator nil
+   :perf #{}})
+
 (defn nemesis-package
   "Takes nemesis options (see jepsen.nemesis.combined for details and examples)
   and constructs a package of nemesis and generators."
@@ -114,6 +158,7 @@
   (let [opts (update opts :faults set)]
     (-> (nc/nemesis-packages opts)
         ; TODO: custom nemeses--port these over from jepsen.voltdb.
-        (concat [(rando-package opts)])
+        (concat [(rando-package opts)
+                 (await-up-package opts)])
         (->> (remove nil?))
         nc/compose-packages)))

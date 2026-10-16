@@ -40,6 +40,19 @@
   {:none []
    :all  [:partition :clock]})
 
+(def node-specs
+  "Node specs jepsen.nemesis.combined understands for partition, kill and pause
+  targets. :primaries needs a db/Primary implementation, which we don't have."
+  #{:one :minority-third :majority :majorities-ring :all})
+
+(defn parse-targets
+  "Takes a comma-separated string of node specs and returns a vector of
+  keywords, e.g. \"one,majority\" -> [:one :majority]."
+  [spec]
+  (->> (str/split spec #",")
+       (remove str/blank?)
+       (mapv keyword)))
+
 (def all-nemeses
   "Combinations of nemeses we run through for test-all"
   [[]
@@ -89,6 +102,24 @@
     :parse-fn #(Long/parseLong %) 
     :default 16
     :validate [pos? "Must be positive"]]
+
+   [nil "--partition-targets SPECS" "Comma-separated node specs for network partitions: one, minority-third, majority, majorities-ring, all. The original default was majority,majorities-ring; it was later narrowed to one, which never forces partition detection or a mastership change at high k-factors."
+    :default [:majority :majorities-ring]
+    :default-desc "majority,majorities-ring"
+    :parse-fn parse-targets
+    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+
+   [nil "--kill-targets SPECS" "Comma-separated node specs for process kills: one, minority-third, majority, majorities-ring, all. all kills the whole cluster, which then recovers from the command log on restart."
+    :default [:one :majority :all]
+    :default-desc "one,majority,all"
+    :parse-fn parse-targets
+    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+
+   [nil "--pause-targets SPECS" "Comma-separated node specs for SIGSTOP pauses: one, minority-third, majority, majorities-ring, all."
+    :default [:one :majority :all]
+    :default-desc "one,majority,all"
+    :parse-fn parse-targets
+    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
 
    [nil "--nemesis-interval SECONDS" "How long between nemesis operations, on average, for each class of fault?"
     ; In my testing, Volt often takes 20 seconds or so just to start up--we
@@ -142,14 +173,11 @@
                   {:db        db
                    :nodes     (:nodes test)
                    :faults    (:nemesis opts)
-                   ; TODO: add support for targeting primaries
-                   :partition {:targets [:one]}
-                   :pause     {:targets [:one]}
-                   :kill      {:targets [:one]}
-                   ; This was the original target def for nemesis before we replaced it with "one"
-                   ;:partition {:targets [:majority :majorities-ring]}
-                   ;:pause     {:targets [:one :majority :all]}
-                   ;:kill      {:targets [:one :majority :all]}
+                   ; Targets come from the CLI (see --partition-targets etc.);
+                   ; the defaults restore the original majority-level faults.
+                   :partition {:targets (:partition-targets opts)}
+                   :pause     {:targets (:pause-targets opts)}
+                   :kill      {:targets (:kill-targets opts)}
 
                    :interval  (:nemesis-interval opts)})
         gen (->> (:generator workload)
@@ -161,11 +189,20 @@
         ; Is there a final generator for this workload?
         gen (if-let [final (:final-generator workload)]
               (gen/phases gen
-                          ; Recovery
+                          ; Recovery: heal the network, resume paused and
+                          ; restart killed processes.
                           (gen/log "Recovering cluster")
                           (gen/nemesis (:final-generator nemesis))
+                          ; Majority partitions make the minority shut itself
+                          ; down through partition detection, and that is not a
+                          ; fault the nemesis packages know to undo. db/start!
+                          ; skips nodes whose daemon is still running, so an
+                          ; unconditional start on every node is safe: it
+                          ; rejoins the ones that died, or recovers the whole
+                          ; cluster from the command log if all of them did.
+                          (gen/nemesis {:type :info, :f :start, :value :all})
                           (gen/log "Waiting for recovery")
-                          (gen/sleep 30)
+                          (gen/nemesis {:type :info, :f :await-up})
                           ; Final generators
                           (gen/clients final))
               ; No final generator
