@@ -47,8 +47,33 @@
 
 (def nemeses
   "All nemesis faults we know about."
-  ; TODO: add bitflip/truncate
-  #{:partition :packet :clock :pause :kill :rando :cluster-restart})
+  #{:partition :packet :clock :pause :kill :rando :cluster-restart
+    :file-corruption})
+
+(def corruptible-dirs
+  "Directories under the voltdbroot whose files the file-corruption nemesis
+  may damage, by name, for --file-corruption-dirs."
+  {:command-log          "command_log"
+   :command-log-snapshot "command_log_snapshot"
+   :snapshots            "snapshots"})
+
+(defn corruptions
+  "Builds the :corruptions list for jepsen.nemesis.combined's file corruption
+  package from the CLI options: for each chosen directory, a bitflip of
+  --bitflip-probability of the bits of a random file in it, and a truncation
+  dropping a geometrically distributed number of bytes (mean
+  --truncate-mean-bytes) from the end of a random file."
+  [opts]
+  (for [dir   (:file-corruption-dirs opts)
+        :let  [path (str voltdb/base-dir "/voltdbroot/" (corruptible-dirs dir))]
+        c     [{:type :bitflip
+                :file path
+                :probability (:bitflip-probability opts)}
+               {:type :truncate
+                :file path
+                :drop {:distribution :geometric
+                       :p (/ 1.0 (:truncate-mean-bytes opts))}}]]
+    c))
 
 (def packet-behaviors
   "Named tc-netem behaviours for --packet-behaviors, each a map as
@@ -106,7 +131,8 @@
    [:rando :kill :partition]
    [:packet]
    [:packet :kill]
-   [:cluster-restart]])
+   [:cluster-restart]
+   [:file-corruption :cluster-restart]])
 
 (defn parse-nemesis-spec
   "Takes a comma-separated nemesis string and returns a collection of keyword
@@ -187,6 +213,28 @@
     :default (mapv packet-behaviors [:delay :slow :loss :corrupt :duplicate :reorder :mixed])
     :default-desc "delay,slow,loss,corrupt,duplicate,reorder,mixed"
     :parse-fn parse-behaviors]
+
+   [nil "--file-corruption-targets SPECS" "Comma-separated node specs for file corruption: one, minority-third, majority, majorities-ring, all. More than a minority risks damaging every replica of a partition, which no database can survive."
+    :default [:one]
+    :default-desc "one"
+    :parse-fn parse-targets
+    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+
+   [nil "--file-corruption-dirs NAMES" "Comma-separated voltdbroot directories the file-corruption nemesis damages: command-log, command-log-snapshot, snapshots."
+    :default [:command-log :command-log-snapshot :snapshots]
+    :default-desc "command-log,command-log-snapshot,snapshots"
+    :parse-fn parse-targets
+    :validate [(partial every? corruptible-dirs) (cli/one-of corruptible-dirs)]]
+
+   [nil "--bitflip-probability P" "Fraction of the bits of the chosen file a bitflip corruption flips."
+    :default 1e-5
+    :parse-fn #(Double/parseDouble %)
+    :validate [#(< 0 % 1) "Must be between 0 and 1"]]
+
+   [nil "--truncate-mean-bytes N" "Mean number of bytes a truncate corruption drops from the end of the chosen file (geometric distribution)."
+    :default 4096
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
 
    [nil "--nemesis-interval SECONDS" "How long between nemesis operations, on average, for each class of fault?"
     ; In my testing, Volt often takes 20 seconds or so just to start up--we
@@ -282,6 +330,12 @@
                    :kill      {:targets (:kill-targets opts)}
                    :packet    {:targets   (:packet-targets opts)
                                :behaviors (:packet-behaviors opts)}
+                   ; Damage to files is only observed when they are read
+                   ; back: at a rejoin or a command-log recovery. Pair this
+                   ; fault with kill or cluster-restart, e.g.
+                   ; --nemesis file-corruption,cluster-restart.
+                   :file-corruption {:targets     (:file-corruption-targets opts)
+                                     :corruptions (vec (corruptions opts))}
 
                    :cluster-restart-down-time (:cluster-restart-down-time opts)
                    :await-up-timeout (:await-up-timeout opts)
