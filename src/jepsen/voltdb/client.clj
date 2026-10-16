@@ -137,6 +137,36 @@
                                          (butlast args)
                                          args)))))
 
+(defn proc-call-error
+  "Maps a ProcCallException to the :error keyword we record in the history:
+  :timeout, :conn-lost, :mastership-change or :user-abort, or the raw message
+  for anything else."
+  [^org.voltdb.client.ProcCallException e]
+  (let [m (or (.getMessage e) "")]
+    (condp re-find m
+      #"^No response received in the allotted time"           :timeout
+      #"^Connection to database host .+ was lost before a response" :conn-lost
+      #"^Transaction dropped due to change in mastership"      :mastership-change
+      #"(?i)user abort|VoltAbortException"                     :user-abort
+      m)))
+
+(defmacro with-errors
+  "Runs body, which should return a completed op, and converts VoltDB client
+  exceptions into :fail or :info completions of op. A failed call whose
+  outcome is known (no connection was available, so nothing was sent, or the
+  server aborted the transaction) is :fail; a timeout or lost connection on a
+  call that may have written is :info unless read-only? is true, in which case
+  it is :fail too, since a read that didn't complete changed nothing."
+  [op read-only? & body]
+  `(try ~@body
+        (catch org.voltdb.client.NoConnectionsException e#
+          (assoc ~op :type :fail, :error :no-conns))
+        (catch org.voltdb.client.ProcCallException e#
+          (let [err# (proc-call-error e#)]
+            (assoc ~op
+                   :type (if (or ~read-only? (= :user-abort err#)) :fail :info)
+                   :error err#)))))
+
 (defn ad-hoc!
   "Run an ad-hoc SQL stored procedure."
   [client & args]
