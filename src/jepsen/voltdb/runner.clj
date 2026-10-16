@@ -19,6 +19,7 @@
                            [multi      :as multi]
                            [nemesis    :as nemesis]
                            [rw-register :as rw-register]
+                           [list-append :as list-append]
                            [set :as vset]
                            [single     :as single]
                            [redundant-register :as redundant-register]]))
@@ -33,6 +34,7 @@
    :redundant-register redundant-register/workload
    :rw-register        rw-register/workload
    :set                vset/workload
+   :list-append        list-append/workload
    :single             single/workload})
 
 (def consistency-models
