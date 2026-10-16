@@ -48,7 +48,7 @@
 (def nemeses
   "All nemesis faults we know about."
   ; TODO: add bitflip/truncate
-  #{:partition :clock :pause :kill :rando})
+  #{:partition :clock :pause :kill :rando :cluster-restart})
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults."
@@ -75,7 +75,8 @@
    [:rando :partition]
    [:rando :pause]
    [:rando :clock]
-   [:rando :kill :partition]])
+   [:rando :kill :partition]
+   [:cluster-restart]])
 
 (defn parse-nemesis-spec
   "Takes a comma-separated nemesis string and returns a collection of keyword
@@ -135,6 +136,16 @@
     :default-desc "one,majority,all"
     :parse-fn parse-targets
     :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+
+   [nil "--cluster-restart-down-time SECONDS" "How long the cluster-restart nemesis leaves every node dead before starting them all again."
+    :default 5
+    :parse-fn #(Long/parseLong %)
+    :validate [#(not (neg? %)) "Must not be negative"]]
+
+   [nil "--await-up-timeout SECONDS" "How long recovery waits for every node to answer client connections again before giving up and recording the nodes still down."
+    :default 600
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
 
    [nil "--nemesis-interval SECONDS" "How long between nemesis operations, on average, for each class of fault?"
     ; In my testing, Volt often takes 20 seconds or so just to start up--we
@@ -229,6 +240,8 @@
                    :pause     {:targets (:pause-targets opts)}
                    :kill      {:targets (:kill-targets opts)}
 
+                   :cluster-restart-down-time (:cluster-restart-down-time opts)
+                   :await-up-timeout (:await-up-timeout opts)
                    :interval  (:nemesis-interval opts)})
         gen (->> (:generator workload)
                  (gen/stagger (/ (:rate opts)))

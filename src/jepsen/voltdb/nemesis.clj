@@ -3,6 +3,7 @@
   (:require [clojure.pprint :refer [pprint]]
             [clojure.tools.logging :refer [info warn]]
             [jepsen [control :as c]
+             [db :as db]
              [nemesis :as n]
              [generator :as gen]
              [net :as net]
@@ -151,6 +152,63 @@
    :generator nil
    :perf #{}})
 
+(defn cluster-restart-nemesis
+  "Kills VoltDB on every node at once, waits a little, then starts every node
+  again, which recovers the cluster from the command log, and blocks until
+  all nodes answer client connections. The random :kill nemesis with an :all
+  target can produce the same sequence, but only by chance and with the
+  restart governed by the kill/start flip-flop; this one makes whole-cluster
+  recovery a first-class fault that happens on every nemesis interval.
+
+  Responds to {:f :cluster-restart}. The op value records how long the
+  cluster took to come back, or the nodes still down at the timeout."
+  [opts]
+  (reify n/Nemesis
+    (setup! [this test] this)
+
+    (invoke! [this test op]
+      (assert (= :cluster-restart (:f op)))
+      (let [db       (:db test)
+            start-ns (System/nanoTime)]
+        (info "Killing VoltDB on every node")
+        (c/on-nodes test (partial db/kill! db))
+        (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
+        (info "Starting VoltDB on every node (recovery from the command log)")
+        (c/on-nodes test (partial db/start! db))
+        (let [timeout-ms (* 1000 (:await-up-timeout opts 600))
+              deadline   (+ start-ns (* timeout-ms 1000000))
+              nodes      (set (:nodes test))]
+          (loop []
+            (let [down (set/difference nodes (set (vc/up-nodes test)))]
+              (cond (empty? down)
+                    (assoc op :value {:recovered-in-ms
+                                      (long (/ (- (System/nanoTime) start-ns)
+                                               1000000))})
+
+                    (< deadline (System/nanoTime))
+                    (do (warn "Nodes still down after cluster restart:" down)
+                        (assoc op :value {:still-down down}))
+
+                    :else
+                    (do (Thread/sleep 5000)
+                        (recur))))))))
+
+    (teardown! [this test])
+
+    n/Reflection
+    (fs [_] #{:cluster-restart})))
+
+(defn cluster-restart-package
+  "Package for the :cluster-restart fault."
+  [opts]
+  (when ((:faults opts) :cluster-restart)
+    {:nemesis   (cluster-restart-nemesis opts)
+     :generator (->> (repeat {:type :info, :f :cluster-restart})
+                     (gen/stagger (:interval opts)))
+     :perf      #{{:name  "cluster-restart"
+                   :fs    #{:cluster-restart}
+                   :color "#E97A4F"}}}))
+
 (defn nemesis-package
   "Takes nemesis options (see jepsen.nemesis.combined for details and examples)
   and constructs a package of nemesis and generators."
@@ -159,6 +217,7 @@
     (-> (nc/nemesis-packages opts)
         ; TODO: custom nemeses--port these over from jepsen.voltdb.
         (concat [(rando-package opts)
+                 (cluster-restart-package opts)
                  (await-up-package opts)])
         (->> (remove nil?))
         nc/compose-packages)))
