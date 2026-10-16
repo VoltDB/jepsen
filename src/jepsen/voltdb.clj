@@ -14,6 +14,7 @@
              [tests        :as tests]
              [util         :as util :refer [await-fn meh timeout]]]
             [jepsen.os.debian     :as debian]
+            [jepsen.nemesis.time  :as nt]
             [jepsen.control.util  :as cu]
             [jepsen.control.net   :as cn]
             [jepsen.voltdb.client :as vc]
@@ -58,12 +59,26 @@
                       (into () (cu/ls-full export-dir))))
       (into []))))
 
+(def helper-install-lock
+  "Serializes the compilation of jepsen's C helpers across nodes."
+  (Object.))
+
 (defn os
   "Given OS, plus python & jdk"
   [os]
   (reify os/OS
     (setup! [_ test node]
       (os/setup! os test node)
+      ; The clock nemesis compiles two C helpers into /opt/jepsen on every
+      ; node, in parallel, at nemesis setup. On the lab's LXD hosts /opt is
+      ; bind-mounted from the host and shared by all containers, so the
+      ; concurrent gcc + mv a.out race and one node fails with "cannot stat
+      ; a.out" (ENG-29876). jepsen skips the compile when the binary already
+      ; exists, so build them here one node at a time: on a shared /opt the
+      ; first node does the work and the rest find it, on a private /opt
+      ; each node builds its own.
+      (locking helper-install-lock
+        (nt/install!))
       ;(comment these should already be installed and in the path
       ;(debian/install ["python3" "openjdk-17-jdk-headless"])
       ;(c/exec :update-alternatives :--install "/usr/bin/python" "python"
