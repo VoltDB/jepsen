@@ -134,6 +134,13 @@
      [:systemsettings
       [:flushinterval {:minimum 10}
        [:export {:interval 10}]]]
+     ; Database replication, when the test gives this cluster a DR role:
+     ; {:id 1, :role "xdcr" | "master" | "replica", :source "h1,h2"}.
+     ; jepsen.voltdb.dr sets this per role through a wrapping DB.
+     (when-let [dr (:dr test)]
+       [:dr {:id (:id dr), :role (:role dr)}
+        (when-let [src (:source dr)]
+          [:connection {:source src}])])
      ; Export configuration, for export tests
      [:export
       [:configuration {:enabled true, :target "export_target", :type "file"}

@@ -19,6 +19,7 @@
                            [multi      :as multi]
                            [nemesis    :as nemesis]
                            [rw-register :as rw-register]
+                           [dr :as dr]
                            [bank :as bank]
                            [list-append :as list-append]
                            [set :as vset]
@@ -37,6 +38,7 @@
    :set                vset/workload
    :list-append        list-append/workload
    :bank               bank/workload
+   :dr                 dr/workload
    :single             single/workload})
 
 (def consistency-models
@@ -277,6 +279,20 @@
 
    [nil "--negative-balances" "Let the bank workload's transfers drive balances negative (the checker then only verifies the total)."]
 
+   [nil "--dr-mode MODE" "For the dr workload: xdcr (active-active, both clusters take writes) or one-way (master to replica)."
+    :default :xdcr
+    :parse-fn keyword
+    :validate [#{:xdcr :one-way} "Must be xdcr or one-way"]]
+
+   [nil "--dr-split NUMBER" "For the dr workload: how many of the nodes form cluster a; the rest form cluster b. Defaults to half."
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--dr-drain-timeout SECONDS" "For the dr workload: how long the final read waits for both clusters to agree."
+    :default 120
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
    [nil "--long-fork-group-size NUMBER" "How many keys each long-fork read checks at once."
     :default 2
     :parse-fn #(Long/parseLong %)
@@ -320,7 +336,10 @@
         ; Right now workloads construct entire test maps. We'll refactor this
         ; in the next commit.
         workload ((workloads workload-name) opts)
-        db       (voltdb/db (:tarball opts) (:force-download opts))
+        db       (let [inner (voltdb/db (:tarball opts) (:force-download opts))]
+                   (if (= :dr workload-name)
+                     (dr/db inner (:dr-mode workload) (:roles workload))
+                     inner))
         nemesis (nemesis/nemesis-package
                   {:db        db
                    :nodes     (:nodes test)
