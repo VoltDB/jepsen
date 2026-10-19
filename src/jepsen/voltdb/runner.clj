@@ -18,6 +18,7 @@
                            [export     :as export]
                            [multi      :as multi]
                            [nemesis    :as nemesis]
+                           [rw-register :as rw-register]
                            [single     :as single]
                            [redundant-register :as redundant-register]]))
 
@@ -26,9 +27,17 @@
   workload maps"
   {:dirty-read         dirty-read/workload
    :export             export/workload
+   :long-fork          rw-register/long-fork-workload
    :multi              multi/workload
    :redundant-register redundant-register/workload
+   :rw-register        rw-register/workload
    :single             single/workload})
+
+(def consistency-models
+  "Consistency models Elle can check for; see elle.consistency-model."
+  #{:strict-serializable :serializable :snapshot-isolation
+    :repeatable-read :read-committed :read-uncommitted
+    :strong-session-serializable :strong-session-snapshot-isolation})
 
 (def nemeses
   "All nemesis faults we know about."
@@ -130,6 +139,39 @@
 
    [nil "--no-reads" "Disable reads, to test write safety only"]
 
+   ; Elle workload options (rw-register, list-append), passed through to
+   ; elle.*/gen and check.
+   [nil "--key-count NUMBER" "Number of distinct keys active at any point in the Elle workloads."
+    :default 10
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--min-txn-length NUMBER" "Minimum number of micro-ops per Elle transaction."
+    :default 1
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--max-txn-length NUMBER" "Maximum number of micro-ops per Elle transaction."
+    :default 4
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--max-writes-per-key NUMBER" "How many writes an Elle key receives before it is retired."
+    :default 32
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--consistency-models MODELS" "Comma-separated consistency models Elle should check the history against."
+    :default [:strict-serializable]
+    :default-desc "strict-serializable"
+    :parse-fn parse-targets
+    :validate [(partial every? consistency-models) (cli/one-of consistency-models)]]
+
+   [nil "--long-fork-group-size NUMBER" "How many keys each long-fork read checks at once."
+    :default 2
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
    ["-p" "--procedure-call-timeout MILLISECONDS"
     "How long should we wait before timing out procedure calls?"
     :default 1000
@@ -206,9 +248,18 @@
                           ; Final generators
                           (gen/clients final))
               ; No final generator
+              gen)
+        ; Elle workloads wrap the whole generator so their final reads can
+        ; see the highest key used.
+        gen (if-let [wrap (:wrap-generator workload)]
+              (wrap gen)
               gen)]
     (merge tests/noop-test
            opts
+           ; Some workloads (e.g. bank) parameterize their generator and
+           ; checker through keys on the test map.
+           (dissoc workload :client :checker :generator :final-generator
+                   :wrap-generator)
            {:name (str (name workload-name)
                        " " (str/join "," (map name (:nemesis opts))))
             :os        (if (:skip-os opts)
