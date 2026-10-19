@@ -48,7 +48,7 @@
 (def nemeses
   "All nemesis faults we know about."
   #{:partition :packet :clock :pause :kill :rando :cluster-restart
-    :file-corruption})
+    :file-corruption :membership})
 
 (def corruptible-dirs
   "Directories under the voltdbroot whose files the file-corruption nemesis
@@ -132,7 +132,9 @@
    [:packet]
    [:packet :kill]
    [:cluster-restart]
-   [:file-corruption :cluster-restart]])
+   [:file-corruption :cluster-restart]
+   [:membership]
+   [:membership :partition]])
 
 (defn parse-nemesis-spec
   "Takes a comma-separated nemesis string and returns a collection of keyword
@@ -337,6 +339,7 @@
                    :file-corruption {:targets     (:file-corruption-targets opts)
                                      :corruptions (vec (corruptions opts))}
 
+                   :kfactor   (:kfactor opts)
                    :cluster-restart-down-time (:cluster-restart-down-time opts)
                    :await-up-timeout (:await-up-timeout opts)
                    :interval  (:nemesis-interval opts)})
