@@ -14,6 +14,7 @@
              [tests        :as tests]
              [util         :as util :refer [await-fn meh timeout]]]
             [jepsen.os.debian     :as debian]
+            [jepsen.nemesis.time  :as nt]
             [jepsen.control.util  :as cu]
             [jepsen.control.net   :as cn]
             [jepsen.voltdb.client :as vc]
@@ -40,6 +41,15 @@
 (def export-csv-files "export")
 (def pidfile (str base-dir "/pidfile"))
 
+(defn db-java-home
+  "JAVA_HOME to use for the VoltDB processes on the DB nodes (voltdb init,
+  voltdb start, sqlcmd). Jepsen 0.3.10+ needs JDK 21 on the control node, but
+  the server kits are qualified on JDK 17, so the two are decoupled: set
+  VOLT_JAVA_HOME for the DB side; it defaults to the control node's JAVA_HOME."
+  []
+  (or (System/getenv "VOLT_JAVA_HOME")
+      (System/getenv "JAVA_HOME")))
+
 (defn list-export-files
   "List export files for the export tests"
   []
@@ -49,12 +59,26 @@
                       (into () (cu/ls-full export-dir))))
       (into []))))
 
+(def helper-install-lock
+  "Serializes the compilation of jepsen's C helpers across nodes."
+  (Object.))
+
 (defn os
   "Given OS, plus python & jdk"
   [os]
   (reify os/OS
     (setup! [_ test node]
       (os/setup! os test node)
+      ; The clock nemesis compiles two C helpers into /opt/jepsen on every
+      ; node, in parallel, at nemesis setup. On the lab's LXD hosts /opt is
+      ; bind-mounted from the host and shared by all containers, so the
+      ; concurrent gcc + mv a.out race and one node fails with "cannot stat
+      ; a.out" (ENG-29876). jepsen skips the compile when the binary already
+      ; exists, so build them here one node at a time: on a shared /opt the
+      ; first node does the work and the rest find it, on a private /opt
+      ; each node builds its own.
+      (locking helper-install-lock
+        (nt/install!))
       ;(comment these should already be installed and in the path
       ;(debian/install ["python3" "openjdk-17-jdk-headless"])
       ;(c/exec :update-alternatives :--install "/usr/bin/python" "python"
@@ -69,7 +93,10 @@
   [node url force?]
    (if-let [[m path _ filename] (re-find #"^file://((.*/)?([^/]+))$" url)]
      (do ; We're installing a local tarball from the control node; upload it.
-       (c/exec :mkdir :-p "/tmp/jepsen")
+       ; A root-owned /tmp/jepsen left behind by an earlier run makes the
+       ; upload fail with Permission denied, so make the directory ours.
+       (c/su (c/exec :mkdir :-p "/tmp/jepsen")
+             (c/exec :chmod "1777" "/tmp/jepsen"))
        (let [remote-path (str "/tmp/jepsen/" filename)]
          (c/upload path remote-path)
          (info (str "unpacking file://" remote-path "to " url " " base-dir))
@@ -129,7 +156,7 @@
                                  );"
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
-                  (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+                  (c/exec (c/env {"JAVA_HOME" (db-java-home)
                                   })
                           "bin/voltdb"
                           :init
@@ -197,7 +224,7 @@
   [test]
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:env {:JAVA_HOME (System/getenv "JAVA_HOME") }
+                (cu/start-daemon! {:env {:JAVA_HOME (db-java-home)}
                                    :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
@@ -234,50 +261,43 @@
   "Takes an SQL query and runs it on the local node via sqlcmd"
   [query]
   (c/cd base-dir
-      (c/exec (c/env {"JAVA_HOME" (System/getenv "JAVA_HOME")
+      (c/exec (c/env {"JAVA_HOME" (db-java-home)
                       })
                       "bin/sqlcmd" (str "--query=" query))))
 
+(defn download-first-jar!
+  "Downloads the first jar in dir whose name matches re to procedures/, if
+  there is one and we don't have it yet. jepsen 0.3.14's cu/ls takes a plain
+  directory, so the glob is applied here."
+  [dir re]
+  (when-let [f (->> (cu/ls dir)
+                    (filter #(re-find re %))
+                    sort
+                    first)]
+    (let [src  (str dir "/" f)
+          dest (io/file (str "procedures/" f))]
+      (when-not (.exists dest)
+        (info "Downloading" f "to" (.getCanonicalPath dest))
+        (c/download src (.getCanonicalPath dest))))))
+
 (defn snarf-procedure-deps!
-  "Downloads voltdb.jar from the current node to procedures/, so we can compile
-  stored procedures."
+  "Downloads the client jar, and the jar holding VoltProcedure, from the
+  current node to procedures/, so we can compile stored procedures. Before
+  15.0 VoltProcedure lived in voltdb/voltdb-*.jar; from 15.0 it is in
+  lib/volt-procedure-*.jar. Whichever is present is taken."
   []
-  (let [dir  (str base-dir "/voltdb/")
-        f    (first (c/cd dir (cu/ls (c/lit "voltdbclient-*.jar"))))
-        src  (str dir f)
-        dest (io/file (str "procedures/" f))]
-    (when-not (.exists dest)
-      (info "Downloading" f "to" (.getCanonicalPath dest))
-      (c/download src (.getCanonicalPath dest))))
-  (try
-  (let [dir  (str base-dir "/voltdb/")
-        f    (first (c/cd dir (cu/ls (c/lit "voltdb-*.jar"))))
-        src  (str dir f)
-        dest (io/file (str "procedures/" f))]
-    (when-not (.exists dest)
-      (info "Downloading" f "to" (.getCanonicalPath dest))
-      (c/download src (.getCanonicalPath dest))))
-  (catch Exception e#
-   ))
-  ; This is for volt 15 and above. VoltProcedure was moved from voltdb/voltdb-.jar to lib/volt-procedure-api*.jar
-  (try
-  (let [dir  (str base-dir "/lib/")
-        f    (first (c/cd dir (cu/ls (c/lit "volt-procedure-*.jar"))))
-        src  (str dir f)
-        dest (io/file (str "procedures/" f))]
-    (when-not (.exists dest)
-      (info "Downloading" f "to" (.getCanonicalPath dest))
-      (c/download src (.getCanonicalPath dest))))
-   (catch Exception e#
-   )))
+  (download-first-jar! (str base-dir "/voltdb") #"^voltdbclient-.*\.jar$")
+  (download-first-jar! (str base-dir "/voltdb") #"^voltdb-.*\.jar$")
+  (download-first-jar! (str base-dir "/lib")    #"^volt-procedure-.*\.jar$"))
 
 (defn build-stored-procedures!
   "Compiles and packages stored procedures in procedures/"
   []
   (sh "mkdir" "obj" :dir "procedures/")
-  ; Volt currently plans on JDK8, and we're concerned that running on 17 might
-  ; be the cause of a bug. Just in case, we'll target compilation back to 11
-  ; (the oldest version you can install on Debian Bookworm easily)
+  ; javac runs on the control node (JDK 21 since jepsen 0.3.10). The
+  ; procedures are still emitted as Java 8 class files so the same jar loads
+  ; into any server kit the matrix runs, including the LTS 13.3.x line.
+  ; JDK 21 accepts -source/-target 8 with a deprecation warning.
   (let [r (sh "bash" "-c" (str (System/getenv "JAVA_HOME") "/bin/javac -verbose -source 8 -target 8 -classpath " (str base-dir) "/lib/*.jar:" (str base-dir) "/voltdb/*.jar:./:./* -d ./obj *.java")
               :dir "procedures/")]
     (when-not (zero? (:exit r))
