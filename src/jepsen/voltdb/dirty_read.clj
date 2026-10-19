@@ -116,18 +116,25 @@
             strong-read-sets (->> ok
                                   (filter #(= :strong-read (:f %)))
                                   (map :value))
-            strong-reads (reduce set/union strong-read-sets)
+            strong-reads (reduce set/union #{} strong-read-sets)
             unseen       (set/difference strong-reads reads)
             dirty        (set/difference reads strong-reads)
-            lost         (set/difference writes strong-reads)]
-        ; We expect one strong read per node
-        (info :strong-read-sets (count strong-read-sets))
-        (info :concurrency (:concurrency test))
-        (assert (= (count strong-read-sets) (:concurrency test)))
-        ; All strong reads had darn well better be equal
-        (assert (apply = (map count (cons strong-reads strong-read-sets))))
-
-        {:valid?            (and (empty? dirty) (empty? lost))
+            lost         (set/difference writes strong-reads)
+            ; Every worker attempts a final strong read, but a worker whose
+            ; node is down after a kill or a majority partition fails its
+            ; read, so we take whatever strong reads succeeded. The old
+            ; assertion that exactly one per worker succeeded threw here and
+            ; turned every such run into :unknown. With no strong read at all
+            ; we can't judge; with several, they must agree.
+            disagreeing  (remove #(= % strong-reads) strong-read-sets)]
+        (info :strong-read-sets (count strong-read-sets)
+              :of (:concurrency test) :workers)
+        {:valid?            (cond (empty? strong-read-sets) :unknown
+                                  (seq disagreeing)         false
+                                  :else (and (empty? dirty) (empty? lost)))
+         :strong-read-ok-count (count strong-read-sets)
+         :strong-read-expected (:concurrency test)
+         :disagreeing-strong-reads (count disagreeing)
          :read-count        (count reads)
          :strong-read-count (count strong-reads)
          :unseen-count      (count unseen)
