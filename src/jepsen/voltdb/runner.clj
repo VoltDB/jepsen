@@ -19,6 +19,7 @@
                            [multi      :as multi]
                            [nemesis    :as nemesis]
                            [rw-register :as rw-register]
+                           [bank :as bank]
                            [list-append :as list-append]
                            [set :as vset]
                            [single     :as single]
@@ -35,6 +36,7 @@
    :rw-register        rw-register/workload
    :set                vset/workload
    :list-append        list-append/workload
+   :bank               bank/workload
    :single             single/workload})
 
 (def consistency-models
@@ -170,6 +172,8 @@
     :default-desc "strict-serializable"
     :parse-fn parse-targets
     :validate [(partial every? consistency-models) (cli/one-of consistency-models)]]
+
+   [nil "--negative-balances" "Let the bank workload's transfers drive balances negative (the checker then only verifies the total)."]
 
    [nil "--long-fork-group-size NUMBER" "How many keys each long-fork read checks at once."
     :default 2
