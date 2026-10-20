@@ -60,8 +60,12 @@
       (into []))))
 
 (def helper-install-lock
-  "Serializes the compilation of jepsen's C helpers across nodes."
+  "Serializes the installation of jepsen's helper binaries across nodes."
   (Object.))
+
+(def bitflip-url
+  "Where jepsen.nemesis/bitflip fetches its helper from (same release)."
+  "https://github.com/aybabtme/bitflip/releases/download/v0.2.0/bitflip_0.2.0_Linux_x86_64.tar.gz")
 
 (defn os
   "Given OS, plus python & jdk"
@@ -78,7 +82,16 @@
       ; first node does the work and the rest find it, on a private /opt
       ; each node builds its own.
       (locking helper-install-lock
-        (nt/install!))
+        (nt/install!)
+        ; Same story for the bitflip helper the file-corruption nemesis
+        ; installs with install-archive!, which rm -rf's and re-creates
+        ; /opt/jepsen/bitflip on every node in parallel: on a shared /opt
+        ; one node's mv lands in a directory another node just removed
+        ; ("cannot create regular file .../README.md"). Install it once
+        ; here, and jepsen.voltdb.nemesis uses a bitflip nemesis that
+        ; skips the install.
+        (when-not (cu/exists? (str nemesis/bitflip-dir "/bitflip"))
+          (c/su (cu/install-archive! bitflip-url nemesis/bitflip-dir))))
       ;(comment these should already be installed and in the path
       ;(debian/install ["python3" "openjdk-17-jdk-headless"])
       ;(c/exec :update-alternatives :--install "/usr/bin/python" "python"
