@@ -210,12 +210,38 @@
                    :fs    #{:cluster-restart}
                    :color "#E97A4F"}}}))
 
+(defn preinstalled-bitflip
+  "jepsen.nemesis/bitflip, minus its setup!, which install-archive!s the
+  helper into /opt/jepsen/bitflip on every node in parallel and races with
+  itself when /opt is shared between the nodes (the lab's LXD containers).
+  jepsen.voltdb/os installs the helper once instead."
+  []
+  (let [inner (n/bitflip)]
+    (reify
+      n/Nemesis
+      (setup! [this test] this)
+      (invoke! [this test op] (n/invoke! inner test op))
+      (teardown! [this test] (n/teardown! inner test))
+      n/Reflection
+      (fs [this] (n/fs inner)))))
+
+(defn nemesis-packages
+  "jepsen.nemesis.combined/nemesis-packages, with the file-corruption
+  package's nemesis built on the pre-installed bitflip helper."
+  [opts]
+  (let [db (:db opts)]
+    (for [pkg (nc/nemesis-packages opts)]
+      (if (= #{:bitflip :truncate} (set (mapcat :fs (:perf pkg))))
+        (assoc pkg :nemesis (nc/file-corruption-nemesis
+                              db (preinstalled-bitflip) (n/truncate-file)))
+        pkg))))
+
 (defn nemesis-package
   "Takes nemesis options (see jepsen.nemesis.combined for details and examples)
   and constructs a package of nemesis and generators."
   [opts]
   (let [opts (update opts :faults set)]
-    (-> (nc/nemesis-packages opts)
+    (-> (nemesis-packages opts)
         ; TODO: custom nemeses--port these over from jepsen.voltdb.
         (concat [(rando-package opts)
                  (cluster-restart-package opts)
