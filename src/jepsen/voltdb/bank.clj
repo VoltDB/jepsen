@@ -67,5 +67,10 @@
   the generator and the checker; the runner merges those keys into the test
   map, where the generator, checker and this client read them."
   [opts]
-  (assoc (bank/test {:negative-balances? (boolean (:negative-balances opts))})
-         :client (map->Client {:initialized? (promise)})))
+  (let [negative? (boolean (:negative-balances opts))]
+    (assoc (bank/test {:negative-balances? negative?})
+           ; bank/test uses the flag for its checker but does not return it,
+           ; and the client reads it from the test map to let BankTransfer
+           ; overdraw, so put it there explicitly.
+           :negative-balances? negative?
+           :client (map->Client {:initialized? (promise)}))))

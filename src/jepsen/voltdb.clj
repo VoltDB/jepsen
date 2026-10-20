@@ -416,10 +416,13 @@
          (do (info "Starting VoltDB on node " node)
              (start-daemon! test)))))
 
-    ;TODO Pause and resume is not implemented properly.
+    ; SIGSTOP / SIGCONT the VoltDB server. jepsen 0.3.12 to 0.3.14 ship a
+    ; control.util/grepkill! that sends no signal at all, so this uses pkill
+    ; directly. 'placementgroup' only appears on the voltdb command line,
+    ; which is also what the Jenkins script keys on.
     db/Pause
     (pause! [this test node]
-      (c/su (cu/grepkill! :stop "java")))
+      (c/su (c/exec :bash :-c "pkill -STOP -f placementgroup || true")))
 
     (resume! [this test node]
-      (c/su (cu/grepkill! :cont "java")))))
+      (c/su (c/exec :bash :-c "pkill -CONT -f placementgroup || true")))))
