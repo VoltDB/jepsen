@@ -196,21 +196,21 @@
     :default-desc "majority,majorities-ring"
     :parse-fn parse-targets
     :validate [(partial valid-targets? partition-specs)
-               (str "Must be a non-empty list of " (cli/one-of partition-specs))]]
+               (str "Must be a non-empty list. " (cli/one-of partition-specs))]]
 
    [nil "--kill-targets SPECS" "Comma-separated node specs for process kills: one, minority-third, minority, majority, all. all kills the whole cluster, which then recovers from the command log on restart."
     :default [:one :majority :all]
     :default-desc "one,majority,all"
     :parse-fn parse-targets
     :validate [(partial valid-targets? node-specs)
-               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
+               (str "Must be a non-empty list. " (cli/one-of node-specs))]]
 
    [nil "--pause-targets SPECS" "Comma-separated node specs for SIGSTOP pauses: one, minority-third, minority, majority, all."
     :default [:one :majority :all]
     :default-desc "one,majority,all"
     :parse-fn parse-targets
     :validate [(partial valid-targets? node-specs)
-               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
+               (str "Must be a non-empty list. " (cli/one-of node-specs))]]
 
    [nil "--cluster-restart-down-time SECONDS" "How long the cluster-restart nemesis leaves every node dead before starting them all again."
     :default 5
@@ -227,7 +227,7 @@
     :default-desc "one,minority-third,majority"
     :parse-fn parse-targets
     :validate [(partial valid-targets? node-specs)
-               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
+               (str "Must be a non-empty list. " (cli/one-of node-specs))]]
 
    [nil "--packet-behaviors NAMES" "Comma-separated tc-netem behaviours the packet nemesis picks from: delay, slow, loss, corrupt, duplicate, reorder, rate, mixed."
     :default (mapv packet-behaviors [:delay :slow :loss :corrupt :duplicate :reorder :mixed])
@@ -239,7 +239,7 @@
     :default-desc "one"
     :parse-fn parse-targets
     :validate [(partial valid-targets? node-specs)
-               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
+               (str "Must be a non-empty list. " (cli/one-of node-specs))]]
 
    [nil "--file-corruption-dirs NAMES" "Comma-separated voltdbroot directories the file-corruption nemesis damages: command-log, command-log-snapshot, snapshots."
     :default [:command-log :command-log-snapshot :snapshots]
