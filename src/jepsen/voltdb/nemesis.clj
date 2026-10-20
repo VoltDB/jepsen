@@ -2,7 +2,8 @@
   "Various packages of faults we can inject against VoltDB clusters."
   (:require [clojure.pprint :refer [pprint]]
             [clojure.tools.logging :refer [info warn]]
-            [jepsen [control :as c]
+            [jepsen [checker :as checker]
+             [control :as c]
              [db :as db]
              [nemesis :as n]
              [generator :as gen]
@@ -144,6 +145,27 @@
 
     n/Reflection
     (fs [_] #{:await-up})))
+
+(defn recovery-checker
+  "Fails the test when a recovery step left nodes down: any :await-up or
+  :cluster-restart op whose value carries :still-down. Data checks can pass
+  on the surviving nodes, so without this a green result would not establish
+  that the cluster recovered. Kept separate from the workload checker so the
+  two outcomes stay distinguishable."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [stuck (->> history
+                       (filter #(and (= :nemesis (:process %))
+                                     (#{:await-up :cluster-restart} (:f %))
+                                     (map? (:value %))
+                                     (:still-down (:value %))))
+                       (map (fn [op] {:f (:f op)
+                                      :time (:time op)
+                                      :still-down (:still-down (:value op))})))]
+        {:valid? (empty? stuck)
+         :recoveries-with-nodes-down (count stuck)
+         :failed-recoveries (vec stuck)}))))
 
 (defn await-up-package
   "Package wrapping await-up-nemesis. Always included: the runner's recovery

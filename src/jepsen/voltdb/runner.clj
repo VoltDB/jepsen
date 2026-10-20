@@ -110,10 +110,17 @@
   {:none []
    :all  [:partition :clock]})
 
+(def partition-specs
+  "Partition specs jepsen.nemesis.combined's partition package (and
+  jepsen.nemesis.combined/grudge) understand. :primaries needs a db/Primary
+  implementation, which we don't have. Note :all is not a partition spec."
+  #{:one :minority-third :majority :majorities-ring})
+
 (def node-specs
-  "Node specs jepsen.nemesis.combined understands for partition, kill and pause
-  targets. :primaries needs a db/Primary implementation, which we don't have."
-  #{:one :minority-third :majority :majorities-ring :all})
+  "Node specs jepsen.nemesis.combined/db-nodes understands, for kill, pause,
+  packet and file-corruption targets. Note :majorities-ring is a partition
+  spec only."
+  #{:one :minority-third :minority :majority :all})
 
 (defn parse-targets
   "Takes a comma-separated string of node specs and returns a vector of
@@ -122,6 +129,11 @@
   (->> (str/split spec #",")
        (remove str/blank?)
        (mapv keyword)))
+
+(defn valid-targets?
+  "A non-empty vector whose every element is in specs."
+  [specs targets]
+  (and (seq targets) (every? specs targets)))
 
 (def all-nemeses
   "Combinations of nemeses we run through for test-all"
@@ -179,23 +191,26 @@
     :default 16
     :validate [pos? "Must be positive"]]
 
-   [nil "--partition-targets SPECS" "Comma-separated node specs for network partitions: one, minority-third, majority, majorities-ring, all. The original default was majority,majorities-ring; it was later narrowed to one, which never forces partition detection or a mastership change at high k-factors."
+   [nil "--partition-targets SPECS" "Comma-separated partition specs for network partitions: one, minority-third, majority, majorities-ring. The original default was majority,majorities-ring; it was later narrowed to one, which never forces partition detection or a mastership change at high k-factors."
     :default [:majority :majorities-ring]
     :default-desc "majority,majorities-ring"
     :parse-fn parse-targets
-    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+    :validate [(partial valid-targets? partition-specs)
+               (str "Must be a non-empty list of " (cli/one-of partition-specs))]]
 
-   [nil "--kill-targets SPECS" "Comma-separated node specs for process kills: one, minority-third, majority, majorities-ring, all. all kills the whole cluster, which then recovers from the command log on restart."
+   [nil "--kill-targets SPECS" "Comma-separated node specs for process kills: one, minority-third, minority, majority, all. all kills the whole cluster, which then recovers from the command log on restart."
     :default [:one :majority :all]
     :default-desc "one,majority,all"
     :parse-fn parse-targets
-    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+    :validate [(partial valid-targets? node-specs)
+               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
 
-   [nil "--pause-targets SPECS" "Comma-separated node specs for SIGSTOP pauses: one, minority-third, majority, majorities-ring, all."
+   [nil "--pause-targets SPECS" "Comma-separated node specs for SIGSTOP pauses: one, minority-third, minority, majority, all."
     :default [:one :majority :all]
     :default-desc "one,majority,all"
     :parse-fn parse-targets
-    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+    :validate [(partial valid-targets? node-specs)
+               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
 
    [nil "--cluster-restart-down-time SECONDS" "How long the cluster-restart nemesis leaves every node dead before starting them all again."
     :default 5
@@ -207,22 +222,24 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
-   [nil "--packet-targets SPECS" "Comma-separated node specs for packet faults: one, minority-third, majority, majorities-ring, all."
+   [nil "--packet-targets SPECS" "Comma-separated node specs for packet faults: one, minority-third, minority, majority, all."
     :default [:one :minority-third :majority]
     :default-desc "one,minority-third,majority"
     :parse-fn parse-targets
-    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+    :validate [(partial valid-targets? node-specs)
+               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
 
    [nil "--packet-behaviors NAMES" "Comma-separated tc-netem behaviours the packet nemesis picks from: delay, slow, loss, corrupt, duplicate, reorder, rate, mixed."
     :default (mapv packet-behaviors [:delay :slow :loss :corrupt :duplicate :reorder :mixed])
     :default-desc "delay,slow,loss,corrupt,duplicate,reorder,mixed"
     :parse-fn parse-behaviors]
 
-   [nil "--file-corruption-targets SPECS" "Comma-separated node specs for file corruption: one, minority-third, majority, majorities-ring, all. More than a minority risks damaging every replica of a partition, which no database can survive."
+   [nil "--file-corruption-targets SPECS" "Comma-separated node specs for file corruption: one, minority-third, minority, majority, all. More than a minority risks damaging every replica of a partition, which no database can survive."
     :default [:one]
     :default-desc "one"
     :parse-fn parse-targets
-    :validate [(partial every? node-specs) (cli/one-of node-specs)]]
+    :validate [(partial valid-targets? node-specs)
+               (str "Must be a non-empty list of " (cli/one-of node-specs))]]
 
    [nil "--file-corruption-dirs NAMES" "Comma-separated voltdbroot directories the file-corruption nemesis damages: command-log, command-log-snapshot, snapshots."
     :default [:command-log :command-log-snapshot :snapshots]
@@ -342,7 +359,7 @@
                      inner))
         nemesis (nemesis/nemesis-package
                   {:db        db
-                   :nodes     (:nodes test)
+                   :nodes     (:nodes opts)
                    :faults    (:nemesis opts)
                    ; Targets come from the CLI (see --partition-targets etc.);
                    ; the defaults restore the original majority-level faults.
@@ -414,6 +431,7 @@
                           :clock      (checker/clock-plot)
                           :stats      (checker/stats)
                           :exceptions (checker/unhandled-exceptions)
+                          :recovery   (nemesis/recovery-checker)
                           :workload   (:checker workload)})})))
 
 (defn all-tests
