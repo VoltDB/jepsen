@@ -419,10 +419,13 @@
     ; SIGSTOP / SIGCONT the VoltDB server. jepsen 0.3.12 to 0.3.14 ship a
     ; control.util/grepkill! that sends no signal at all, so this uses pkill
     ; directly. 'placementgroup' only appears on the voltdb command line,
-    ; which is also what the Jenkins script keys on.
+    ; which is also what the Jenkins script keys on. The bracketed pattern
+    ; keeps pkill -f from matching the shell that runs it: with a plain
+    ; pattern it SIGSTOPped its own parent bash, which then never returned
+    ; and hung the test.
     db/Pause
     (pause! [this test node]
-      (c/su (c/exec :bash :-c "pkill -STOP -f placementgroup || true")))
+      (c/su (c/exec :bash :-c "pkill -STOP -f '[p]lacementgroup' || true")))
 
     (resume! [this test node]
-      (c/su (c/exec :bash :-c "pkill -CONT -f placementgroup || true")))))
+      (c/su (c/exec :bash :-c "pkill -CONT -f '[p]lacementgroup' || true")))))
