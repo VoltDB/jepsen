@@ -78,3 +78,21 @@ https://github.com/jepsen-io/voltdb
 
 ## clojure repo
 https://clojure.org/releases/downloads_older
+
+## Byteman fault injection
+
+`--byteman` attaches the [Byteman](https://byteman.jboss.org/) agent to every
+VoltDB server JVM (ENG-30396). The agent and submit jars are dependencies in
+`project.clj`; setup uploads them, plus every rule file in
+`resources/byteman/`, to `<base-dir>/byteman/` on each node, and the server
+starts with `VOLTDB_OPTS=-javaagent:...=listener:true,port:9091`. The listener
+binds to localhost on the node; `jepsen.voltdb.byteman` loads and unloads rules
+by running Byteman's submit client on the node over SSH. Nothing needs to be
+installed on the node images beyond the JDK.
+
+```
+lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis partition --byteman
+```
+
+With no rules loaded the agent only adds its listener thread. See
+`resources/byteman/README.md` for how rules are written.

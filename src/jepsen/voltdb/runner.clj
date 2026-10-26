@@ -167,6 +167,8 @@
 
    [nil "--force-download" "Re-download tarballs, even if cached locally"]
 
+   [nil "--byteman" "Attach the Byteman agent (listener on localhost:9091) to every VoltDB server JVM, so rules from resources/byteman can be loaded mid-test. Off by default; with no rules loaded it should not change behaviour."]
+
    ["-l" "--license FILE" "Path to the VoltDB license file on the control node"
     :default "license.xml"]
 
