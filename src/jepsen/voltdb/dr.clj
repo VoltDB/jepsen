@@ -26,7 +26,8 @@
                     [db :as db]
                     [generator :as gen]
                     [history :as h]
-                    [role :as role]]
+                    [role :as role]
+                    [util :refer [await-fn]]]
             [jepsen.voltdb :as voltdb]
             [jepsen.voltdb.client :as vc]))
 
@@ -95,6 +96,42 @@
                                    PARTITION TABLE " table " ON COLUMN id;
                                    DR TABLE " table ";")))))))
 
+(defn dr-role-rows
+  "The cluster-wide @Statistics DRROLE rows of cluster r."
+  [test r]
+  (with-open [conn (vc/connect (first (role/nodes test r))
+                               (select-keys test [:procedure-call-timeout
+                                                  :connection-response-timeout]))]
+    (->> (vc/call! conn "@Statistics" "DRROLE" 0)
+         first
+         :rows)))
+
+(defn await-dr-active!
+  "Blocks until each cluster reports DRROLE ACTIVE for its peer. Writes made
+  before that are never DR-logged: an XDCR producer only logs for a peer once
+  it is in its active consumer set (its DRROLE is PENDING until then), and the
+  joining cluster's sync snapshot only carries the peer's data. Starting the
+  workload any earlier leaves rows the peer can never receive."
+  [test]
+  (let [mode  (:dr-mode test :xdcr)
+        roles (:roles test)]
+    (doseq [r [:a :b]]
+      (let [peer (:id (dr-config mode roles (case r :a :b, :b :a)))]
+        (await-fn (fn check-dr-role []
+                    (let [rows (dr-role-rows test r)]
+                      (when-not (some #(and (= peer (long (:REMOTE_CLUSTER_ID %)))
+                                            (= "ACTIVE" (:STATE %)))
+                                      rows)
+                        (throw (IllegalStateException.
+                                 (str "DR not active for cluster " peer ": "
+                                      (pr-str (map #(select-keys % [:ROLE :STATE :REMOTE_CLUSTER_ID])
+                                                   rows))))))))
+                  {:log-message (str "Waiting for cluster " r " DR to reach ACTIVE")
+                   :log-interval 10000
+                   :retry-interval 1000
+                   :timeout 300000})
+        (info "Cluster" r "DR is ACTIVE for cluster" peer)))))
+
 (defn read-set
   [conn]
   (->> (vc/ad-hoc! conn (str "SELECT id FROM " table ";"))
@@ -147,7 +184,8 @@
 
   (setup! [this test]
     (when (deliver initialized? true)
-      (create-schema! test)))
+      (create-schema! test)
+      (await-dr-active! test)))
 
   (invoke! [this test op]
     (case (:f op)

@@ -329,6 +329,15 @@
       (throw (RuntimeException. (str "STDOUT:\n" (:out r)
                                      "\n\nSTDERR:\n" (:err r)))))))
 
+(def procedures-lock
+  "Serializes building and uploading the stored procedures jar. A composed
+  test (the dr workload's jepsen.role/db) has one primary per cluster, and
+  each primary builds the jar in the same procedures/ directory on the control
+  node. Concurrent `jar cvf` runs replace each other's output, so one fails
+  with NoSuchFileException: jepsen-procedures.jar, or a node is sent a jar the
+  other build is still rewriting (ENG-30359)."
+  (Object.))
+
 (defn upload-stored-procedures!
   "Uploads stored procedures jar."
   [node]
@@ -352,9 +361,10 @@
 
       ; Prepare stored procedures in parallel
       (let [procedures (future (when (= node (jepsen/primary test))
-                                 (snarf-procedure-deps!)
-                                 (build-stored-procedures!)
-                                 (upload-stored-procedures! node)))]
+                                 (locking procedures-lock
+                                   (snarf-procedure-deps!)
+                                   (build-stored-procedures!)
+                                   (upload-stored-procedures! node))))]
         ; Boot
         (configure! test node)
         (db/start! this test node)
