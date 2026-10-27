@@ -115,8 +115,8 @@ lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis b
 | `client-response-delay` | `client-response-delay.btm` | Loads the rule on every node for 10 s: every 25th client response waits 1.5 s on its network thread, past the client's 1 s timeout | The workload checker passes |
 | `promotion-delay` | `promotion-delay.btm` | Loads the rule on all nodes but one, kills that one; the survivors' new leaders wait 3 s before repairing; rejoins the killed node | Leaders were promoted, the node rejoins, the workload checker passes |
 | `rejoin-kill` | `rejoin-kill.btm` | Kills a node and rejoins it with the rule in its startup script: 2 s into the stream snapshot the rule kills it again; rejoins it once more without the rule | The rule killed the rejoining node, the second rejoin succeeds |
-| `replay-delay` | `replay-delay.btm` | Restarts the whole cluster with the rule in one node's startup script: its command log replay waits 100 ms on each of the first 50 transactions | Recovery completes, the workload checker passes |
-| `replay-error` | `replay-error.btm` | As `replay-delay`, but the 5th replayed transaction throws; then restarts the cluster without the rule | That node crashes (with a FATAL, which the Jenkins job counts as a failure, so it is not in `byteman-rules`) and the clean recovery completes |
+| `replay-delay` | `replay-delay.btm` | Restarts the whole cluster with the rule in every node's startup script. Each partition's log is replayed by one host, so only the replaying hosts (usually one, recorded as `:replayed-on`) wait 100 ms on each of their first 50 transactions | Recovery completes, the workload checker passes |
+| `replay-error` | `replay-error.btm` | As `replay-delay`, but each replaying host's 5th transaction throws; then restarts the cluster without the rule | The replaying hosts crash (with a FATAL, which the Jenkins job counts as a failure, so it is not in `byteman-rules`) and the clean recovery completes |
 
 For every run the nemesis also counts the rule's `fired` lines on each node
 and checks that every node up before the run is up after it. The `byteman`

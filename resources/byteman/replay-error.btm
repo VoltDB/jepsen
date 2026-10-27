@@ -1,13 +1,14 @@
 # Window: command log replay during whole-cluster recovery (see
 #   replay-delay.btm).
 #
-# Fault: on one node, the 5th transaction the replay consumer reinitiates
-#   fails with a RuntimeException from Iv2TransactionCreator.createTransaction.
+# Fault: the 5th transaction a host's replay consumer reinitiates fails
+#   with a RuntimeException from Iv2TransactionCreator.createTransaction.
+#   In every node's startup script; only the replaying hosts reach it.
 #   As in snapshot-write-ioexception.btm, the exception is thrown from the
 #   callee so it reaches the consumer's own catch block, which crashes the
 #   node on purpose ("Error in command log reinitiator task consumer").
 #
-# Correct behaviour: recovery fails loudly on that node (it exits, with a
+# Correct behaviour: recovery fails loudly on the replaying host (it exits, with a
 #   FATAL in volt.log); it never carries on with the record skipped. A
 #   recovery without the rule then completes with every acknowledged
 #   transaction present. The FATAL is expected, so this fault is kept out of

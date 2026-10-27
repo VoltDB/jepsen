@@ -20,7 +20,7 @@ renamed or inlined method would otherwise turn the test into a no-op.
 | `client-response-delay.btm` | `ClientInterface$ClientResponseWork.getSerializedSize`, after commit | Every 25th response held 1.5 s | `client-response-delay` |
 | `promotion-delay.btm` | `SpPromoteAlgo` / `MpPromoteAlgo.repairSurvivors` | 3 s delay before repair, under the deliver lock | `promotion-delay` |
 | `rejoin-kill.btm` | `StreamSnapshotSink.processMessage` on the rejoining node | 2 s delay, then `killJVM()` | `rejoin-kill` |
-| `replay-delay.btm` | `CommandLogReinitiatorImpl$TaskMessageConsumer.run` | 100 ms on each of the first 50 replayed transactions | `replay-delay` |
+| `replay-delay.btm` | `CommandLogReinitiatorImpl$TaskMessageConsumer.run` on the replaying hosts | 100 ms on each of the first 50 replayed transactions | `replay-delay` |
 | `replay-error.btm` | Same, with the throw in `Iv2TransactionCreator.createTransaction` | `RuntimeException` on the 5th replayed transaction | `replay-error` |
 
 To add a fault: write the rule file (header comment, `traceln("BYTEMAN

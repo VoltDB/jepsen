@@ -315,45 +315,62 @@
             (seq still-down) (update :problems (fnil conj [])
                                      :retry-rejoin-failed)))))))
 
-;; replay-delay and replay-error: whole-cluster recovery from the command log
-;; with the rule on one node.
+;; replay-delay and replay-error: whole-cluster recovery from the command
+;; log. Each partition's log is replayed by one host, chosen from the hosts'
+;; fault logs (CommandLogReplayState.shouldSkip); the rest skip it, and the
+;; rules only fire on replayed transactions. So every node gets the rule in
+;; its startup script, and the fault hits whichever hosts replay (in
+;; practice usually one). :replayed-on records them.
 
 (defn- recover-with-boot-rule!
-  "Kills every node, starts them all again with the fault's rule in the
-  victim's startup script, and waits for the cluster. Returns
-  {:victim :still-down}."
+  "Kills every node, starts them all again with the fault's rule in their
+  startup scripts, and waits for the cluster. Returns
+  {:replayed-on :still-down}."
   [fault test opts]
   (let [nodes  (:nodes test)
-        victim (rand-nth nodes)]
-    (info (name fault) ": restarting the cluster with the rule on" victim)
+        before (fired-counts test nodes fault)]
+    (info (name fault) ": restarting the cluster with the rule in every"
+          "node's startup script")
     (kill-nodes! test nodes)
-    (set-boot-rule! test victim fault)
+    (doseq [node nodes] (set-boot-rule! test node fault))
     (start-nodes! test nodes)
-    {:victim victim :still-down (await-nodes-up test nodes opts)}))
+    (let [still-down (await-nodes-up test nodes opts)
+          fired      (fired-since before (fired-counts test nodes fault))]
+      {:replayed-on (vec (for [[node n] fired
+                               :when (and (number? n) (pos? n))]
+                           node))
+       :still-down  still-down})))
+
+(defn- clear-boot-rules-everywhere! [test fault]
+  (doseq [node (:nodes test)] (clear-boot-rule! test node fault)))
 
 (defmethod run-fault :replay-delay [fault test opts up]
-  (let [{:keys [victim still-down]} (recover-with-boot-rule! fault test opts)]
-    (clear-boot-rule! test victim fault)
-    (cond-> {:victim victim}
+  (let [{:keys [replayed-on still-down]}
+        (recover-with-boot-rule! fault test opts)]
+    (clear-boot-rules-everywhere! test fault)
+    (cond-> {:replayed-on replayed-on}
       (seq still-down) (update :problems (fnil conj [])
                                :recovery-incomplete))))
 
 (defmethod run-fault :replay-error [fault test opts up]
-  ; The victim should crash during replay. Whatever the others do, the
-  ; cluster then gets a clean restart without the rule, which must recover.
-  (let [nodes  (:nodes test)
-        {:keys [victim still-down]} (recover-with-boot-rule! fault test opts)
-        crashed? (not (get (running? test victim) victim))]
-    (clear-boot-rule! test victim fault)
+  ; The replaying host should crash. Whatever the others do, the cluster
+  ; then gets a clean restart without the rule, which must recover.
+  (let [nodes   (:nodes test)
+        {:keys [replayed-on still-down]}
+        (recover-with-boot-rule! fault test opts)
+        running (->> replayed-on (filter #(get (running? test %) %)) vec)]
+    (clear-boot-rules-everywhere! test fault)
     (info "replay-error: restarting the cluster without the rule")
     (kill-nodes! test nodes)
     (start-nodes! test nodes)
     (let [down (await-nodes-up test nodes opts)]
-      (cond-> {:victim victim :crashed crashed?
+      (cond-> {:replayed-on replayed-on
+               :still-running-after-error running
                :down-during-faulted-recovery still-down}
-        (not crashed?) (update :problems (fnil conj []) :victim-did-not-crash)
-        (seq down)     (update :problems (fnil conj [])
-                               :clean-recovery-failed)))))
+        (seq running) (update :problems (fnil conj [])
+                              :replaying-node-did-not-crash)
+        (seq down)    (update :problems (fnil conj [])
+                              :clean-recovery-failed)))))
 
 ;; The nemesis
 
