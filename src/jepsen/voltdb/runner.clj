@@ -50,7 +50,7 @@
 (def nemeses
   "All nemesis faults we know about."
   #{:partition :packet :clock :pause :kill :rando :cluster-restart
-    :file-corruption :membership})
+    :file-corruption :membership :snapshot-io-error})
 
 (def corruptible-dirs
   "Directories under the voltdbroot whose files the file-corruption nemesis
@@ -148,7 +148,8 @@
    [:cluster-restart]
    [:file-corruption :cluster-restart]
    [:membership]
-   [:membership :partition]])
+   [:membership :partition]
+   [:snapshot-io-error]])
 
 (defn parse-nemesis-spec
   "Takes a comma-separated nemesis string and returns a collection of keyword
@@ -351,7 +352,11 @@
 (defn voltdb-test
   "Takes parsed CLI options from -main and constructs a Jepsen test map."
   [opts]
-  (let [workload-name (:workload opts)
+  (let [; Byteman faults need the agent on the servers
+        opts          (cond-> opts
+                        (some #{:snapshot-io-error} (:nemesis opts))
+                        (assoc :byteman true))
+        workload-name (:workload opts)
         ; Right now workloads construct entire test maps. We'll refactor this
         ; in the next commit.
         workload ((workloads workload-name) opts)
@@ -429,12 +434,16 @@
             :nemesis   (:nemesis nemesis)
             :db        db
             :checker   (checker/compose
-                         {:perf       (checker/perf {:nemeses (:perf nemesis)})
-                          :clock      (checker/clock-plot)
-                          :stats      (checker/stats)
-                          :exceptions (checker/unhandled-exceptions)
-                          :recovery   (nemesis/recovery-checker)
-                          :workload   (:checker workload)})})))
+                         (cond->
+                           {:perf       (checker/perf {:nemeses (:perf nemesis)})
+                            :clock      (checker/clock-plot)
+                            :stats      (checker/stats)
+                            :exceptions (checker/unhandled-exceptions)
+                            :recovery   (nemesis/recovery-checker)
+                            :workload   (:checker workload)}
+                           (some #{:snapshot-io-error} (:nemesis opts))
+                           (assoc :snapshot-io-error
+                                  (nemesis/snapshot-io-error-checker))))})))
 
 (defn all-tests
   "Turns CLI options into a sequence of tests to perform."

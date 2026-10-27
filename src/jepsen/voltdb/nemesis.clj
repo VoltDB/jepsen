@@ -13,9 +13,11 @@
             [jepsen.nemesis [combined :as nc]
              [time :as nt]]
             [jepsen.voltdb :as voltdb]
-            [jepsen.voltdb [client :as vc]
+            [jepsen.voltdb [byteman :as byteman]
+                           [client :as vc]
                            [membership :as membership]]
             [clojure.set :as set]
+            [clojure.string :as str]
             [slingshot.slingshot :refer [try+ throw+]])
   (:import (org.voltdb.client ClientResponse)))
 
@@ -232,6 +234,191 @@
                    :fs    #{:cluster-restart}
                    :color "#E97A4F"}}}))
 
+(def snapshot-io-error-rule
+  "Rule file (resources/byteman) for the :snapshot-io-error fault."
+  "snapshot-write-ioexception.btm")
+
+(def snapshot-io-error-dir
+  "Where the :snapshot-io-error nemesis writes its snapshots on each node:
+  outside voltdbroot, so the half-written files never meet a restore scan or
+  the file-corruption nemesis. Teardown removes it with the rest of base-dir."
+  (str (byteman/dir voltdb/base-dir) "/snapshots"))
+
+(def snapshot-io-error-timeout-ms
+  "How long the :snapshot-io-error nemesis waits for its snapshot to finish
+  (succeed or fail) on every host."
+  60000)
+
+(defn- on-nodes-or-error
+  "Runs (f node) on each node in parallel, returning {node result}, where a
+  node that throws maps to {:error message} instead of failing the op."
+  [test nodes f]
+  (c/on-nodes test nodes
+              (fn [test node]
+                (try (f node)
+                     (catch Exception e
+                       {:error (.getMessage e)})))))
+
+(defn- snapshot-status
+  "The @Statistics SNAPSHOTSTATUS rows for the given nonce, one per host and
+  table."
+  [conn nonce]
+  (->> (vc/call! conn "@Statistics" "SNAPSHOTSTATUS" (int 0))
+       first
+       :rows
+       (filter #(= nonce (:NONCE %)))))
+
+(defn- await-snapshot-done
+  "Polls SNAPSHOTSTATUS until the nonce has rows and none is IN_PROGRESS, or
+  the timeout elapses. Returns the last rows seen."
+  [conn nonce]
+  (let [deadline (+ (System/currentTimeMillis) snapshot-io-error-timeout-ms)]
+    (loop []
+      (let [rows (snapshot-status conn nonce)]
+        (if (or (< deadline (System/currentTimeMillis))
+                (and (seq rows)
+                     (not-any? #(= "IN_PROGRESS" (:RESULT %)) rows)))
+          rows
+          (do (Thread/sleep 1000)
+              (recur)))))))
+
+(defn- fired-count
+  "How many times the snapshot-write-ioexception rule logged that it fired
+  for the nonce, from the node's stdout.log (Byteman's traceln writes to the
+  server's stdout)."
+  [nonce]
+  (-> (c/exec :grep :-c (str "BYTEMAN snapshot-write-ioexception fired nonce="
+                             nonce " ")
+              (str voltdb/base-dir "/log/stdout.log")
+              (c/lit "|| true"))
+      str/trim
+      Long/parseLong))
+
+(defn snapshot-io-error-nemesis
+  "Byteman milestone 2 (ENG-30396): makes a snapshot fail with an IOException
+  mid-write. Loads resources/byteman/snapshot-write-ioexception.btm into
+  every node that is up, takes a blocking @SnapshotSave whose nonce starts
+  with BYTEMAN_ (the rule only fires for those), waits for SNAPSHOTSTATUS to
+  settle, unloads the rule, then counts the rule's 'fired' lines in each
+  node's stdout.log. Needs --byteman, which the runner turns on for this
+  fault.
+
+  Responds to {:f :snapshot-io-error}. The op value records which nodes were
+  up before and after, where the rule loaded, SNAPSHOTSTATUS results, the
+  save's own result rows, and the fired counts; snapshot-io-error-checker
+  judges them."
+  [opts]
+  (reify n/Nemesis
+    (setup! [this test] this)
+
+    (invoke! [this test op]
+      (assert (= :snapshot-io-error (:f op)))
+      (let [up        (vec (vc/up-nodes test))
+            java-home (voltdb/db-java-home)]
+        (if (empty? up)
+          (assoc op :value {:skipped :no-nodes-up})
+          (let [nonce  (str "BYTEMAN_" (System/currentTimeMillis))
+                node   (rand-nth up)
+                loaded (on-nodes-or-error
+                         test up
+                         (fn [_]
+                           (c/exec :mkdir :-p snapshot-io-error-dir)
+                           (byteman/load-rules! voltdb/base-dir java-home
+                                                snapshot-io-error-rule)
+                           :loaded))
+                result (try
+                         (let [conn (vc/connect
+                                      node {:procedure-call-timeout
+                                            snapshot-io-error-timeout-ms
+                                            :connection-response-timeout
+                                            snapshot-io-error-timeout-ms})]
+                           (try
+                             (let [res  (.callProcedure
+                                          conn "@SnapshotSave"
+                                          (into-array Object
+                                            [snapshot-io-error-dir
+                                             nonce
+                                             (int 1)]))
+                                   save (->> (.getResults res)
+                                             (map vc/volt-table->map)
+                                             first
+                                             :rows)]
+                               {:save-status  (.getStatus res)
+                                :save-results (frequencies (map :RESULT save))
+                                :status-results
+                                (frequencies
+                                  (map :RESULT (await-snapshot-done conn nonce)))})
+                             (finally (vc/close! conn))))
+                         (catch Exception e
+                           {:error (.getMessage e)})
+                         (finally
+                           (on-nodes-or-error
+                             test up
+                             (fn [_] (byteman/unload-rules!
+                                       voltdb/base-dir java-home
+                                       snapshot-io-error-rule)))))
+                fired  (on-nodes-or-error test up (fn [_] (fired-count nonce)))
+                down   (vec (set/difference (set up) (set (vc/up-nodes test))))]
+            (info "snapshot-io-error" nonce "on" node ":" result
+                  "fired:" fired "down after:" down)
+            (assoc op :value (merge {:nonce      nonce
+                                     :node       node
+                                     :loaded     loaded
+                                     :fired      fired
+                                     :down-after down}
+                                    result))))))
+
+    (teardown! [this test])
+
+    n/Reflection
+    (fs [_] #{:snapshot-io-error})))
+
+(defn snapshot-io-error-checker
+  "Judges the :snapshot-io-error ops. A run passes when the rule fired on at
+  least one node, the snapshot was reported failed (some SNAPSHOTSTATUS row
+  is FAILURE), and every node that was up before the fault is still up.
+  Per the plan, a rule that never fired is a failure, as is a test where no
+  run happened. The runner adds this checker only when the fault is enabled."
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [runs (->> history
+                      (filter #(and (= :nemesis (:process %))
+                                    (= :snapshot-io-error (:f %))
+                                    (map? (:value %))
+                                    (:nonce (:value %))))
+                      (map :value))
+            problems
+            (for [{:keys [nonce fired status-results down-after error]} runs
+                  :let [fired-total (->> (vals fired) (filter number?)
+                                         (reduce + 0))
+                        p (cond-> []
+                            error
+                            (conj :error)
+                            (zero? fired-total)
+                            (conj :never-fired)
+                            (not (pos? (get status-results "FAILURE" 0)))
+                            (conj :not-reported-failed)
+                            (seq down-after)
+                            (conj :nodes-down-after))]
+                  :when (seq p)]
+              {:nonce nonce :problems p :down-after down-after
+               :error error :status-results status-results})]
+        {:valid?   (boolean (and (seq runs) (empty? problems)))
+         :runs     (count runs)
+         :problems (vec problems)}))))
+
+(defn snapshot-io-error-package
+  "Package for the :snapshot-io-error fault (Byteman)."
+  [opts]
+  (when ((:faults opts) :snapshot-io-error)
+    {:nemesis   (snapshot-io-error-nemesis opts)
+     :generator (->> (repeat {:type :info, :f :snapshot-io-error})
+                     (gen/stagger (:interval opts)))
+     :perf      #{{:name  "snapshot-io-error"
+                   :fs    #{:snapshot-io-error}
+                   :color "#C9A0E6"}}}))
+
 (defn preinstalled-bitflip
   "jepsen.nemesis/bitflip, minus its setup!, which install-archive!s the
   helper into /opt/jepsen/bitflip on every node in parallel and races with
@@ -267,6 +454,7 @@
         ; TODO: custom nemeses--port these over from jepsen.voltdb.
         (concat [(rando-package opts)
                  (cluster-restart-package opts)
+                 (snapshot-io-error-package opts)
                  (membership/package opts)
                  (await-up-package opts)])
         (->> (remove nil?))

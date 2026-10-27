@@ -85,7 +85,7 @@ https://clojure.org/releases/downloads_older
 VoltDB server JVM (ENG-30396). The agent and submit jars are dependencies in
 `project.clj`; setup uploads them, plus every rule file in
 `resources/byteman/`, to `<base-dir>/byteman/` on each node, and the server
-starts with `VOLTDB_OPTS=-javaagent:...=listener:true,port:9091`. The listener
+starts with `VOLTDB_OPTS=-javaagent:...=listener:true,port:9091,boot:...`. The listener
 binds to localhost on the node; `jepsen.voltdb.byteman` loads and unloads rules
 by running Byteman's submit client on the node over SSH. Nothing needs to be
 installed on the node images beyond the JDK.
@@ -96,3 +96,22 @@ lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis p
 
 With no rules loaded the agent only adds its listener thread. See
 `resources/byteman/README.md` for how rules are written.
+
+### snapshot-io-error
+
+`--nemesis snapshot-io-error` (turns on `--byteman` itself) makes a snapshot
+fail with an `IOException` mid-write, every `--nemesis-interval` seconds on
+average. Each run loads `snapshot-write-ioexception.btm` on every node that is
+up, takes a blocking `@SnapshotSave` with a `BYTEMAN_<millis>` nonce, waits
+for `@Statistics SNAPSHOTSTATUS` to settle, unloads the rule and counts the
+rule's `fired` lines in each node's stdout.log.
+
+```
+lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis snapshot-io-error
+```
+
+The `snapshot-io-error` checker fails the test if, for any run, the rule
+never fired, SNAPSHOTSTATUS has no FAILURE row for the nonce, or a node that
+was up before the run is down after it, or if the fault was enabled and no
+run happened. The op values in history.edn hold the details (`:fired` per
+node, `:status-results`, `:save-results`, `:down-after`).

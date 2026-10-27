@@ -82,9 +82,16 @@
 (defn agent-opts
   "The JVM option that attaches the agent with its listener on, for
   VOLTDB_OPTS. With no rules loaded the agent only adds the listener thread
-  and class-load hooks."
+  and class-load hooks.
+
+  boot: puts the agent jar on the bootstrap classpath, which rules on JDK
+  classes need (snapshot-write-ioexception.btm throws from
+  sun.nio.ch.FileChannelImpl.write). Without it the woven JDK method cannot
+  load Byteman's classes, and every call to it throws NoClassDefFoundError
+  while such a rule is loaded."
   [base-dir]
-  (str "-javaagent:" (agent-jar base-dir) "=listener:true,port:" port))
+  (str "-javaagent:" (agent-jar base-dir)
+       "=listener:true,port:" port ",boot:" (agent-jar base-dir)))
 
 (defn- submit!
   "Runs Byteman's submit client on the node against the local agent and
