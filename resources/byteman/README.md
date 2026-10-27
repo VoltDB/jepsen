@@ -16,7 +16,18 @@ renamed or inlined method would otherwise turn the test into a no-op.
 
 | File | Window | Fault | Nemesis |
 |---|---|---|---|
-| `snapshot-write-ioexception.btm` | `DefaultSnapshotDataTarget` write task, table-data block write | `IOException` from `FileChannel.write`, only for snapshots whose nonce starts with `BYTEMAN_` | `--nemesis snapshot-io-error` |
+| `snapshot-write-ioexception.btm` | `DefaultSnapshotDataTarget` write task, table-data block write | `IOException` from `FileChannel.write`, only for snapshots whose nonce starts with `BYTEMAN_` | `snapshot-io-error` |
+| `client-response-delay.btm` | `ClientInterface$ClientResponseWork.getSerializedSize`, after commit | Every 25th response held 1.5 s | `client-response-delay` |
+| `promotion-delay.btm` | `SpPromoteAlgo` / `MpPromoteAlgo.repairSurvivors` | 3 s delay before repair, under the deliver lock | `promotion-delay` |
+| `rejoin-kill.btm` | `StreamSnapshotSink.processMessage` on the rejoining node | 2 s delay, then `killJVM()` | `rejoin-kill` |
+| `replay-delay.btm` | `CommandLogReinitiatorImpl$TaskMessageConsumer.run` | 100 ms on each of the first 50 replayed transactions | `replay-delay` |
+| `replay-error.btm` | Same, with the throw in `Iv2TransactionCreator.createTransaction` | `RuntimeException` on the 5th replayed transaction | `replay-error` |
+
+To add a fault: write the rule file (header comment, `traceln("BYTEMAN
+<label> fired ...")`), add it to `faults` in
+`src/jepsen/voltdb/byteman_faults.clj`, add a `run-fault` method that sets
+up the operation the rule targets, and add the name to `nemeses` in
+`runner.clj`.
 
 ## Pitfalls
 
@@ -34,6 +45,10 @@ renamed or inlined method would otherwise turn the test into a no-op.
 - **Anonymous classes are named by source order** (`Foo$3`). A refactor
   silently moves the rule to a different class or none; the fired-line check
   catches that.
+- **Rules a JVM needs at startup go in its startup script.** A rejoining or
+  recovering node starts the targeted work before a rule could be submitted
+  over the listener, so those faults copy the rule to `boot.btm` before
+  starting the node and empty it after.
 - **Check rules before running them.** `TestScript` type-checks a rule file
   against the server's classes, which catches missing fields and methods:
 

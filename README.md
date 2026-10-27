@@ -97,21 +97,36 @@ lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis p
 With no rules loaded the agent only adds its listener thread. See
 `resources/byteman/README.md` for how rules are written.
 
-### snapshot-io-error
+### Byteman faults
 
-`--nemesis snapshot-io-error` (turns on `--byteman` itself) makes a snapshot
-fail with an `IOException` mid-write, every `--nemesis-interval` seconds on
-average. Each run loads `snapshot-write-ioexception.btm` on every node that is
-up, takes a blocking `@SnapshotSave` with a `BYTEMAN_<millis>` nonce, waits
-for `@Statistics SNAPSHOTSTATUS` to settle, unloads the rule and counts the
-rule's `fired` lines in each node's stdout.log.
+Each Byteman fault is a nemesis fault name; naming one turns on `--byteman`
+itself. `--nemesis byteman-rules` runs the plan's first rule set (every fault
+below except `replay-error`). Faults run one at a time in round-robin order,
+every `--nemesis-interval` seconds on average. Several restart nodes or the
+whole cluster, so allow about two minutes of `--time-limit` per fault.
 
 ```
-lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis snapshot-io-error
+lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis byteman-rules --time-limit 600
 ```
 
-The `snapshot-io-error` checker fails the test if, for any run, the rule
-never fired, SNAPSHOTSTATUS has no FAILURE row for the nonce, or a node that
-was up before the run is down after it, or if the fault was enabled and no
-run happened. The op values in history.edn hold the details (`:fired` per
-node, `:status-results`, `:save-results`, `:down-after`).
+| Fault | Rule file | What a run does | Passes when |
+|---|---|---|---|
+| `snapshot-io-error` | `snapshot-write-ioexception.btm` | Loads the rule on every node that is up, takes a blocking `@SnapshotSave` with a `BYTEMAN_<millis>` nonce, waits for `@Statistics SNAPSHOTSTATUS` to settle, unloads | SNAPSHOTSTATUS reports FAILURE for the nonce |
+| `client-response-delay` | `client-response-delay.btm` | Loads the rule on every node for 10 s: every 25th client response waits 1.5 s on its network thread, past the client's 1 s timeout | The workload checker passes |
+| `promotion-delay` | `promotion-delay.btm` | Loads the rule on all nodes but one, kills that one; the survivors' new leaders wait 3 s before repairing; rejoins the killed node | Leaders were promoted, the node rejoins, the workload checker passes |
+| `rejoin-kill` | `rejoin-kill.btm` | Kills a node and rejoins it with the rule in its startup script: 2 s into the stream snapshot the rule kills it again; rejoins it once more without the rule | The rule killed the rejoining node, the second rejoin succeeds |
+| `replay-delay` | `replay-delay.btm` | Restarts the whole cluster with the rule in one node's startup script: its command log replay waits 100 ms on each of the first 50 transactions | Recovery completes, the workload checker passes |
+| `replay-error` | `replay-error.btm` | As `replay-delay`, but the 5th replayed transaction throws; then restarts the cluster without the rule | That node crashes (with a FATAL, which the Jenkins job counts as a failure, so it is not in `byteman-rules`) and the clean recovery completes |
+
+For every run the nemesis also counts the rule's `fired` lines on each node
+and checks that every node up before the run is up after it. The `byteman`
+checker fails the test on any run with problems (`:never-fired`,
+`:nodes-down-after` and the fault-specific ones above), and on any enabled
+fault that never ran. Each run's op value in history.edn holds the details:
+`:fired` per node, `:down-after`, `:problems`, the victim node and the
+fault's own results.
+
+Rules that must be in place when a server JVM starts, before one could be
+submitted (rejoin and replay), go in `<base-dir>/byteman/boot.btm`, which
+the agent loads at startup (`script:` option). It is empty except while such
+a fault runs.

@@ -1,0 +1,32 @@
+# Window: command log replay during whole-cluster recovery (see
+#   replay-delay.btm).
+#
+# Fault: on one node, the 5th transaction the replay consumer reinitiates
+#   fails with a RuntimeException from Iv2TransactionCreator.createTransaction.
+#   As in snapshot-write-ioexception.btm, the exception is thrown from the
+#   callee so it reaches the consumer's own catch block, which crashes the
+#   node on purpose ("Error in command log reinitiator task consumer").
+#
+# Correct behaviour: recovery fails loudly on that node (it exits, with a
+#   FATAL in volt.log); it never carries on with the record skipped. A
+#   recovery without the rule then completes with every acknowledged
+#   transaction present. The FATAL is expected, so this fault is kept out of
+#   the byteman-rules nemesis set.
+
+RULE replay-error tag
+CLASS org.voltdb.CommandLogReinitiatorImpl$TaskMessageConsumer
+METHOD run
+AT INVOKE createTransaction
+IF incrementCounter("replay-error") == 5
+DO link("replay-error", Thread.currentThread(), "5")
+ENDRULE
+
+RULE replay-error throw
+CLASS org.voltdb.Iv2TransactionCreator
+METHOD createTransaction
+AT ENTRY
+IF linked("replay-error", Thread.currentThread()) != null
+DO traceln("BYTEMAN replay-error fired record="
+           + unlink("replay-error", Thread.currentThread()));
+   throw new RuntimeException("Byteman replay-error (injected)")
+ENDRULE

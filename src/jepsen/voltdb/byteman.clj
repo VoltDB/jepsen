@@ -34,6 +34,13 @@
 (defn submit-jar [base-dir] (str (dir base-dir) "/byteman-submit.jar"))
 (defn rules-dir  [base-dir] (str (dir base-dir) "/rules"))
 
+(defn boot-script
+  "Rule file the agent loads when the JVM starts (its script: option). Empty
+  except while a fault needs a rule in place before the server could take
+  one over the listener, such as during a rejoin or command log replay."
+  [base-dir]
+  (str (dir base-dir) "/boot.btm"))
+
 (defn- local-jar
   "The jar on the control node's classpath that holds the given class file,
   found from the class resource so the class is never loaded or initialized
@@ -77,6 +84,7 @@
   (c/upload (.getCanonicalPath (local-submit-jar)) (submit-jar base-dir))
   (doseq [f (local-rule-files)]
     (c/upload (.getCanonicalPath f) (str (rules-dir base-dir) "/" (.getName f))))
+  (c/exec :truncate :-s 0 (boot-script base-dir))
   (info "Byteman agent uploaded to" (dir base-dir)))
 
 (defn agent-opts
@@ -88,10 +96,14 @@
   classes need (snapshot-write-ioexception.btm throws from
   sun.nio.ch.FileChannelImpl.write). Without it the woven JDK method cannot
   load Byteman's classes, and every call to it throws NoClassDefFoundError
-  while such a rule is loaded."
+  while such a rule is loaded.
+
+  script: loads boot-script at startup; it is empty unless a fault has set
+  it with set-boot-rules!."
   [base-dir]
   (str "-javaagent:" (agent-jar base-dir)
-       "=listener:true,port:" port ",boot:" (agent-jar base-dir)))
+       "=listener:true,port:" port ",boot:" (agent-jar base-dir)
+       ",script:" (boot-script base-dir)))
 
 (defn- submit!
   "Runs Byteman's submit client on the node against the local agent and
@@ -120,6 +132,30 @@
   [base-dir java-home & rule-files]
   (apply submit! base-dir java-home :-l
          (map (partial rule-path base-dir) rule-files)))
+
+(defn set-boot-rules!
+  "Makes the node's next server JVM load the named rule file (from
+  resources/byteman) at startup."
+  [base-dir rule-file]
+  (c/exec :cp (rule-path base-dir rule-file) (boot-script base-dir)))
+
+(defn clear-boot-rules!
+  "Empties the startup rule file, so later server JVMs start with no rules.
+  Rules a running JVM loaded from it stay loaded; unload them first with
+  (unload-rules! base-dir java-home) if the JVM is still up."
+  [base-dir]
+  (c/exec :truncate :-s 0 (boot-script base-dir)))
+
+(defn fired-count
+  "How many 'BYTEMAN <label> fired' lines the node's server stdout holds.
+  Rules write these with traceln. stdout.log is appended to across
+  restarts, so callers compare counts from before and after a fault."
+  [base-dir label]
+  (-> (c/exec :grep :-c (str "BYTEMAN " label " fired")
+              (str base-dir "/log/stdout.log")
+              (c/lit "|| true"))
+      str/trim
+      Long/parseLong))
 
 (defn unload-rules!
   "Unloads the named rule files from the node's agent, or every rule when

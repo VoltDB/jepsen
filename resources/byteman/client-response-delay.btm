@@ -1,0 +1,22 @@
+# Window: the client response path, after the transaction has committed.
+#   ClientInterface hands each InitiateResponseMessage to the connection's
+#   network thread as a ClientResponseWork; getSerializedSize removes the
+#   client handle and readies the response for the wire.
+#
+# Fault: hold every 25th response on its network thread for 1.5 s, longer
+#   than the Jepsen client's 1 s procedure-call timeout, so the client gives
+#   up on a transaction that did commit (an :info op). The network thread
+#   also carries other connections' responses, which wait behind it.
+#
+# Correct behaviour: the delayed transactions are applied once, whether or
+#   not their client saw the response; the workload checker finds no lost or
+#   duplicated writes, and no node crashes.
+
+RULE client-response-delay
+CLASS org.voltdb.ClientInterface$ClientResponseWork
+METHOD getSerializedSize
+AT ENTRY
+IF incrementCounter("client-response-delay") % 25 == 0
+DO traceln("BYTEMAN client-response-delay fired");
+   delay(1500)
+ENDRULE
