@@ -167,6 +167,8 @@
 
    [nil "--force-download" "Re-download tarballs, even if cached locally"]
 
+   [nil "--lazyfs" "Put the command log and snapshots on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root."]
+
    ["-l" "--license FILE" "Path to the VoltDB license file on the control node"
     :default "license.xml"]
 
