@@ -14,6 +14,7 @@
             [jepsen.checker.timeline :as timeline]
             [jepsen.os.debian :as debian]
             [jepsen.voltdb :as voltdb]
+            [jepsen.voltdb.lazyfs :as lazyfs]
             [jepsen.voltdb [dirty-read :as dirty-read]
                            [export     :as export]
                            [multi      :as multi]
@@ -53,7 +54,7 @@
     :file-corruption :membership})
 
 (def corruptible-dirs
-  "Directories under the voltdbroot whose files the file-corruption nemesis
+  "Directories (under the voltdbroot, or the LazyFS mount with --lazyfs) whose files the file-corruption nemesis
   may damage, by name, for --file-corruption-dirs."
   {:command-log          "command_log"
    :command-log-snapshot "command_log_snapshot"
@@ -67,7 +68,10 @@
   --truncate-mean-bytes) from the end of a random file."
   [opts]
   (for [dir   (:file-corruption-dirs opts)
-        :let  [path (str voltdb/base-dir "/voltdbroot/" (corruptible-dirs dir))]
+        :let  [root (if (:lazyfs opts)
+                      (lazyfs/mount-dir voltdb/base-dir)
+                      (str voltdb/base-dir "/voltdbroot"))
+               path (str root "/" (corruptible-dirs dir))]
         c     [{:type :bitflip
                 :file path
                 :probability (:bitflip-probability opts)}

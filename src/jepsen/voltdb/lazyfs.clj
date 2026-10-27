@@ -39,6 +39,29 @@
      [:commandlogsnapshot {:path (str d "/command_log_snapshot")}]
      [:snapshots          {:path (str d "/snapshots")}]]))
 
+(def cache-size
+  "LazyFS cache size. LazyFS allocates all of it up front."
+  "0.5GB")
+
+(defn config
+  "LazyFS config text. Unlike jepsen.lazyfs/config this turns on LRU eviction,
+  which writes dirty pages back before reusing them, as a kernel's page cache
+  would. With eviction off, LazyFS keeps every page it has ever cached (an
+  fsync only marks pages clean), and once the cache is full it writes straight
+  through to the backing directory, so nothing written after that can be lost:
+  the test would pass while testing nothing."
+  [{:keys [fifo log-file]}]
+  (str "[faults]\n"
+       "fifo_path=\"" fifo "\"\n"
+       "[cache]\n"
+       "apply_eviction=true\n"
+       "[cache.simple]\n"
+       "custom_size=\"" cache-size "\"\n"
+       "blocks_per_page=1\n"
+       "[filesystem]\n"
+       "logfile=\"" log-file "\"\n"
+       "log_all_operations=false\n"))
+
 (defn lazyfs-map
   "jepsen.lazyfs's description of our mount: its backing directory, fifo,
   config and log all live in <base-dir>/lazyfs.lazyfs."
@@ -86,7 +109,7 @@
       (info "Mounting LazyFS at" dir)
       (c/exec :mkdir :-p dir data-dir)
       (c/exec :touch log-file)
-      (cu/write-file! (lazyfs/config m) config-file)
+      (cu/write-file! (config m) config-file)
       ; The mount script must run from the lazyfs directory
       (c/cd (str install "/lazyfs")
             (c/exec "scripts/mount-lazyfs.sh"
@@ -105,7 +128,20 @@
   [base-dir]
   (meh (lazyfs/umount! (lazyfs-map base-dir))))
 
-(defn log-files
-  "LazyFS's own log, for the test's log files."
+(defn report!
+  "Asks LazyFS to write its cache usage and the files holding unsynced data to
+  its log, if it is mounted."
   [base-dir]
+  (let [m (lazyfs-map base-dir)]
+    (when (lazyfs/mounted? m)
+      (meh (lazyfs/fifo! m "lazyfs::display-cache-usage"))
+      (meh (lazyfs/fifo! m "lazyfs::unsynced-data-report"))
+      ; LazyFS reads the fifo on its own thread; let it log before we copy
+      (Thread/sleep 1000))))
+
+(defn log-files
+  "LazyFS's own log, for the test's log files. Reports cache usage into it
+  first."
+  [base-dir]
+  (report! base-dir)
   [(:log-file (lazyfs-map base-dir))])
