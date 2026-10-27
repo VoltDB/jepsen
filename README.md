@@ -94,8 +94,11 @@ installed on the node images beyond the JDK.
 lein run test --tarball file://voltdb-ent-<version>.tar.gz -w single --nemesis partition --byteman
 ```
 
-With no rules loaded the agent only adds its listener thread. See
-`resources/byteman/README.md` for how rules are written.
+With no rules loaded the agent only adds its listener thread.
+[resources/byteman/README.md](resources/byteman/README.md) is the guide to
+writing a rule and adding a fault, for example to force a window you suspect
+while chasing a bug. `resources/byteman/check-rules.sh` type-checks rules
+against a VoltDB build.
 
 ### Byteman faults
 
