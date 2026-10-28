@@ -372,9 +372,7 @@
         opts          (cond-> opts
                         (seq byteman-on) (assoc :byteman true)
                         ; Power loss drops LazyFS's unsynced writes
-                        ((set (:nemesis opts)) :power-loss) (assoc :lazyfs true)
-                        (:node-count opts) (update :nodes
-                                                   #(vec (take (:node-count opts) %))))
+                        ((set (:nemesis opts)) :power-loss) (assoc :lazyfs true))
         workload-name (:workload opts)
         ; Right now workloads construct entire test maps. We'll refactor this
         ; in the next commit.
@@ -472,13 +470,35 @@
     (for [n nemeses, w workloads, i (range (:test-count opts))]
       (voltdb-test (assoc opts :workload w, :nemesis n)))))
 
+(defn take-nodes
+  "--node-count: keeps only the first N of the given nodes."
+  [parsed]
+  (if-let [n (get-in parsed [:options :node-count])]
+    (update-in parsed [:options :nodes] #(vec (take n %)))
+    parsed))
+
+(defn opt-fn
+  "jepsen.cli/test-opt-fn, with take-nodes between parsing the nodes and
+  parsing the concurrency, so --concurrency 4n counts only the nodes the test
+  runs on."
+  [parsed]
+  (-> parsed
+      cli/rename-ssh-options
+      (cli/rename-options {:leave-db-running :leave-db-running?})
+      (cli/rename-options {:logging-json :logging-json?})
+      cli/parse-nodes
+      take-nodes
+      cli/parse-concurrency))
+
 (defn -main
   "Main entry point for the CLI. Takes CLI options and runs tests, launches a
   web server, analyzes results, etc."
   [& args]
-  (cli/run! (merge (cli/single-test-cmd {:test-fn voltdb-test
-                                         :opt-spec opt-spec})
+  (cli/run! (merge (cli/single-test-cmd {:test-fn  voltdb-test
+                                         :opt-spec opt-spec
+                                         :opt-fn*  opt-fn})
                    (cli/test-all-cmd {:tests-fn all-tests
-                                      :opt-spec opt-spec})
+                                      :opt-spec opt-spec
+                                      :opt-fn*  opt-fn})
                    (cli/serve-cmd))
             args))
