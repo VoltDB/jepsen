@@ -13,6 +13,12 @@
                  ; netty-all pin that 13.3.2 needed is gone
                  [org.voltdb/voltdbclient "16.0.0"]
                  [org.clojure/data.csv "1.0.1"]
+                 ; Byteman agent and its submit client (--byteman, ENG-30396).
+                 ; The jars are uploaded to the DB nodes at setup, so this pin
+                 ; is the version every run uses. 4.0.27 (June 2026) rather
+                 ; than 4.0.28, which was only a few days old when pinned.
+                 [org.jboss.byteman/byteman "4.0.27"]
+                 [org.jboss.byteman/byteman-submit "4.0.27"]
                  ]
   :jvm-opts ["-Xmx8g"
              ; Compiling the runner loads elle.viz, which touches the AWT

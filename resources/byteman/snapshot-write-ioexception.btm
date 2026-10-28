@@ -1,0 +1,47 @@
+# Window: a persistent snapshot writing table data to its .vpt file.
+#   DefaultSnapshotDataTarget queues each compressed block on its write
+#   service; the anonymous Callable ($3, the third anonymous class in the
+#   source) rate-limits, then writes the block with FileChannel.write inside
+#   a try whose IOException handler marks the target failed.
+#
+# Fault: the next FileChannel.write of that block throws IOException, as a
+#   real disk error (EIO, ENOSPC) would, for snapshots whose nonce starts
+#   with BYTEMAN_. Only the snapshot-io-error nemesis uses that prefix, so
+#   command log truncation snapshots (where VoltDB deliberately crashes the
+#   node on an IOException) and other snapshots are not touched.
+#
+# Correct behaviour: the snapshot is reported failed (@Statistics
+#   SNAPSHOTSTATUS RESULT=FAILURE, "Failed to take snapshot <nonce>" in
+#   volt.log), no node crashes, and the cluster keeps serving.
+#
+# Why two rules: Byteman raises a rule's exception from handler code it
+# appends to the trigger method, outside that method's own try blocks, so a
+# throw placed in the Callable itself skips its catch and finally (the target
+# is never marked failed, its buffers leak and close() waits forever). The
+# throw therefore happens in the callee, FileChannelImpl.write, and reaches
+# the Callable at its call site like a real IOException. The first rule tags
+# the snapshot write thread just before that call; the second fires only on
+# a tagged thread and clears the tag.
+#
+# The $3 class name follows the source order of anonymous classes in
+# DefaultSnapshotDataTarget. If it changes, the rules stop matching and never
+# fire, which the nemesis reports as a failure.
+
+RULE snapshot-write-ioexception tag
+CLASS org.voltdb.DefaultSnapshotDataTarget$3
+METHOD call
+AT INVOKE org.voltdb.NativeSnapshotDataTarget.enforceSnapshotRateLimit
+IF $0.this$0.m_nonce.startsWith("BYTEMAN_")
+DO link("snapshot-write-ioexception", Thread.currentThread(),
+        $0.this$0.m_nonce + " file=" + $0.this$0)
+ENDRULE
+
+RULE snapshot-write-ioexception throw
+CLASS sun.nio.ch.FileChannelImpl
+METHOD write(java.nio.ByteBuffer)
+AT ENTRY
+IF linked("snapshot-write-ioexception", Thread.currentThread()) != null
+DO traceln("BYTEMAN snapshot-write-ioexception fired nonce="
+           + unlink("snapshot-write-ioexception", Thread.currentThread()));
+   throw new java.io.IOException("Byteman snapshot-write-ioexception (injected)")
+ENDRULE

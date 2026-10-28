@@ -13,7 +13,8 @@
             [jepsen.nemesis [combined :as nc]
              [time :as nt]]
             [jepsen.voltdb :as voltdb]
-            [jepsen.voltdb [client :as vc]
+            [jepsen.voltdb [byteman-faults :as byteman-faults]
+                           [client :as vc]
                            [membership :as membership]]
             [clojure.set :as set]
             [slingshot.slingshot :refer [try+ throw+]])
@@ -267,6 +268,7 @@
         ; TODO: custom nemeses--port these over from jepsen.voltdb.
         (concat [(rando-package opts)
                  (cluster-restart-package opts)
+                 (byteman-faults/package opts)
                  (membership/package opts)
                  (await-up-package opts)])
         (->> (remove nil?))

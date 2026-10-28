@@ -19,6 +19,7 @@
                            [export     :as export]
                            [multi      :as multi]
                            [nemesis    :as nemesis]
+                           [byteman-faults :as byteman-faults]
                            [rw-register :as rw-register]
                            [dr :as dr]
                            [bank :as bank]
@@ -51,7 +52,8 @@
 (def nemeses
   "All nemesis faults we know about."
   #{:partition :packet :clock :pause :kill :rando :cluster-restart
-    :file-corruption :membership})
+    :file-corruption :membership :snapshot-io-error :client-response-delay
+    :promotion-delay :rejoin-kill :replay-delay :replay-error})
 
 (def corruptible-dirs
   "Directories (under the voltdbroot, or the LazyFS mount with --lazyfs) whose files the file-corruption nemesis
@@ -112,7 +114,9 @@
 (def special-nemeses
   "A map of special nemesis names to collections of faults."
   {:none []
-   :all  [:partition :clock]})
+   :all  [:partition :clock]
+   ; The plan's first Byteman rule set (ENG-30396)
+   :byteman-rules byteman-faults/rule-set})
 
 (def partition-specs
   "Partition specs jepsen.nemesis.combined's partition package (and
@@ -152,7 +156,9 @@
    [:cluster-restart]
    [:file-corruption :cluster-restart]
    [:membership]
-   [:membership :partition]])
+   [:membership :partition]
+   ; all-tests passes these straight through, so no special names here
+   byteman-faults/rule-set])
 
 (defn parse-nemesis-spec
   "Takes a comma-separated nemesis string and returns a collection of keyword
@@ -170,6 +176,8 @@
                "Must be an integer, optionally followed by n."]]
 
    [nil "--force-download" "Re-download tarballs, even if cached locally"]
+
+   [nil "--byteman" "Attach the Byteman agent (listener on localhost:9091) to every VoltDB server JVM, so rules from resources/byteman can be loaded mid-test. Off by default; with no rules loaded it should not change behaviour."]
 
    [nil "--lazyfs" "Put the command log and snapshots on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root."]
 
@@ -355,7 +363,11 @@
 (defn voltdb-test
   "Takes parsed CLI options from -main and constructs a Jepsen test map."
   [opts]
-  (let [workload-name (:workload opts)
+  (let [; Byteman faults need the agent on the servers
+        byteman-on    (filter (set (:nemesis opts)) (keys byteman-faults/faults))
+        opts          (cond-> opts
+                        (seq byteman-on) (assoc :byteman true))
+        workload-name (:workload opts)
         ; Right now workloads construct entire test maps. We'll refactor this
         ; in the next commit.
         workload ((workloads workload-name) opts)
@@ -433,12 +445,16 @@
             :nemesis   (:nemesis nemesis)
             :db        db
             :checker   (checker/compose
-                         {:perf       (checker/perf {:nemeses (:perf nemesis)})
-                          :clock      (checker/clock-plot)
-                          :stats      (checker/stats)
-                          :exceptions (checker/unhandled-exceptions)
-                          :recovery   (nemesis/recovery-checker)
-                          :workload   (:checker workload)})})))
+                         (cond->
+                           {:perf       (checker/perf {:nemeses (:perf nemesis)})
+                            :clock      (checker/clock-plot)
+                            :stats      (checker/stats)
+                            :exceptions (checker/unhandled-exceptions)
+                            :recovery   (nemesis/recovery-checker)
+                            :workload   (:checker workload)}
+                           (seq byteman-on)
+                           (assoc :byteman (byteman-faults/checker
+                                             byteman-on))))})))
 
 (defn all-tests
   "Turns CLI options into a sequence of tests to perform."

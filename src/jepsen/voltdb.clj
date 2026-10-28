@@ -18,6 +18,7 @@
             [jepsen.control.util  :as cu]
             [jepsen.control.net   :as cn]
             [jepsen.voltdb.client :as vc]
+            [jepsen.voltdb.byteman :as byteman]
             [jepsen.voltdb.lazyfs :as lazyfs]
             [knossos.model        :as model]
             [clojure.data.xml     :as xml]
@@ -247,7 +248,13 @@
   [test]
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:env {:JAVA_HOME (db-java-home)}
+                (cu/start-daemon! {:env (cond-> {:JAVA_HOME (db-java-home)}
+                                          ; --byteman: attach the agent to the
+                                          ; server JVM (bin/voltdb appends
+                                          ; VOLTDB_OPTS to its JVM arguments)
+                                          (:byteman test)
+                                          (assoc :VOLTDB_OPTS
+                                                 (byteman/agent-opts base-dir)))
                                    :logfile (str base-dir "/log/stdout.log")
                                    :pidfile pidfile
                                    :chdir   base-dir}
@@ -365,6 +372,9 @@
         (lazyfs/umount! base-dir))
       ; Download and unpack
       (install! node url force-download?)
+      ; The Byteman jars and rules go in after the kit, which replaces base-dir
+      (when (:byteman test)
+        (byteman/install! base-dir))
       ; LazyFS goes in after the kit, which replaces base-dir, and before
       ; init, which creates the command log and snapshot directories in it
       (when (:lazyfs test)
@@ -380,6 +390,11 @@
         (configure! test node)
         (db/start! this test node)
         (await-start node)
+        ; Fail setup here, not mid-test, if the agent did not attach: listing
+        ; the loaded rules needs the agent's listener to answer.
+        (when (:byteman test)
+          (info node "Byteman agent attached; loaded rules:"
+                (byteman/list-rules base-dir (db-java-home))))
 
         ; Wait for convergence
         (jepsen/synchronize test 240)
