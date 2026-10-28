@@ -1,0 +1,28 @@
+# Window: partition leader promotion after a node fails, between the new
+#   leader collecting the survivors' repair logs and repairing them.
+#   SpPromoteAlgo / MpPromoteAlgo.repairSurvivors run under the initiator
+#   mailbox's deliver lock, so a delay here holds the new leader, and every
+#   message to it, before repair completes.
+#
+# Fault: delay each repairSurvivors call by 3 s on the surviving nodes.
+#
+# Correct behaviour: no lost or duplicated transactions (the workload
+#   checker), the promoted leaders take over, and the killed node rejoins.
+
+RULE promotion-delay sp
+CLASS org.voltdb.iv2.SpPromoteAlgo
+METHOD repairSurvivors
+AT ENTRY
+IF TRUE
+DO traceln("BYTEMAN promotion-delay fired sp");
+   delay(3000)
+ENDRULE
+
+RULE promotion-delay mp
+CLASS org.voltdb.iv2.MpPromoteAlgo
+METHOD repairSurvivors
+AT ENTRY
+IF TRUE
+DO traceln("BYTEMAN promotion-delay fired mp");
+   delay(3000)
+ENDRULE

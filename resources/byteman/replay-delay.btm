@@ -1,0 +1,22 @@
+# Window: command log replay during whole-cluster recovery.
+#   CommandLogReinitiatorImpl$TaskMessageConsumer.run reinitiates each logged
+#   transaction through TransactionCreator.createTransaction.
+#
+# Fault: delay each of the first 50 transactions a host reinitiates by
+#   100 ms, so its replay runs about 5 s longer. Each partition's log is
+#   replayed by one host (CommandLogReplayState.shouldSkip), so the rule is
+#   in every node's startup script and only the replaying hosts (usually
+#   one) are delayed. Loaded at startup, since replay starts before a rule
+#   could be submitted.
+#
+# Correct behaviour: recovery completes with every acknowledged
+#   transaction present (the workload checker); it never skips records.
+
+RULE replay-delay
+CLASS org.voltdb.CommandLogReinitiatorImpl$TaskMessageConsumer
+METHOD run
+AT INVOKE createTransaction
+IF incrementCounter("replay-delay") <= 50
+DO traceln("BYTEMAN replay-delay fired");
+   delay(100)
+ENDRULE
