@@ -139,12 +139,13 @@ a fault runs.
 `--lazyfs` puts each node's command log, command log snapshots and snapshots on
 [LazyFS](https://github.com/dsrhaslab/lazyfs) 0.3.1 (commit `045a0b3`), a FUSE
 filesystem that holds written data in its own cache until it is fsynced.
-Dropping that cache after killing VoltDB loses what a power loss would. This
-milestone only mounts it: the workloads and nemeses are unchanged, and a killed
-node keeps its unsynced writes as before.
+Dropping that cache after killing VoltDB loses what a power loss would. On
+its own, `--lazyfs` changes no fault: a killed node keeps its unsynced writes
+as before. `--nemesis power-loss` (below) is the fault that drops them.
 
 ```
 lein run test -w single --nemesis kill --lazyfs ...
+lein run test -w set --nemesis power-loss --node-count 3 --kfactor 1 ...
 ```
 
 What it does on each node, in `src/jepsen/voltdb/lazyfs.clj`:
@@ -231,3 +232,57 @@ holding unsynced data was the 512 KB command log tracker
 it; `voltdb recover --safemode` reads it to stop replay at the last finished
 transaction. A power loss can leave it stale, which matters only for safe-mode
 recovery. Nothing else was ever left unsynced.
+
+### Power loss
+
+`--nemesis power-loss` (turns on `--lazyfs`) cuts power to every node at once,
+about every `--nemesis-interval` seconds:
+
+1. SIGKILLs VoltDB on every node and waits until it has exited, so none of
+   its writes can reach LazyFS after the next step.
+2. Drops every write LazyFS holds that was not fsynced, after logging which
+   files held unsynced data (in `lazyfs.lazyfs/log`).
+3. Starts every node, which recovers the cluster from the command log, and
+   waits until all of them answer clients, like `cluster-restart`.
+
+With a synchronous command log, VoltDB fsyncs a transaction before it
+acknowledges it, so no acknowledged write may be lost; the workload checkers
+verify that. The op's value records `:recovered-in-ms`, or `:still-down`
+nodes, which fail the test, and `:voltdbroot-writes`: per node, the files
+VoltDB modified under voltdbroot since the last power loss. voltdbroot is not
+on LazyFS, so those writes survive here although a real power loss could lose
+them.
+
+`--node-count N` runs on the first N of the nodes given with `-n`, e.g. a
+3-node cluster from the lab's 5-node pool. It is applied before
+`--concurrency 4n` is resolved.
+
+#### Results
+
+jenkins-st `matrix-systemtest-apprunner-jepsen` / `ENG-30396-lazyfs`, builds
+#4 and #5: 3 nodes, k=1, synchronous command log, 300 s per workload,
+`--nemesis-interval 30`.
+
+| Workload | Power losses | Recovery (s) | Result |
+|---|---|---|---|
+| set | 8 | 16.7 | PASS |
+| rw-register | 12 | 16.7 | PASS |
+| list-append | 8 | 16.7-21.7 | PASS |
+| bank | 10 | 16.7 | PASS |
+| redundant-register | 9 | 16.7-21.7 | PASS |
+| single | 9 | 16.7 | PASS |
+
+No acknowledged write was lost, and every recovery brought all 3 nodes back.
+
+- **What was dropped.** At almost every power loss, the only unsynced data
+  was the 512 KB command log tracker (`command_log/tracker/commandlog-*`),
+  which only `voltdb recover --safemode` reads. Once, 4 KB of a command log
+  segment (`command_log/segments/loaned.1`) on one node was dropped. That
+  cell (bank) still passed.
+- **What recovery writes outside LazyFS.** Every restart rewrites
+  `config/cluster.properties`, `config/config.json`,
+  `config/deployment.yaml`, `config/path.properties`, `config/catalog.jar`
+  and `export_cursor/export_cursor_{0,1}` under voltdbroot. A power loss
+  during or just after a restart could tear these, and the next recovery
+  reads them. This test cannot cover that until voltdbroot itself is on
+  LazyFS, which needs LazyFS to answer `statfs` (see above).
