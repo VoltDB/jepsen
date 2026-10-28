@@ -287,6 +287,28 @@
    (c/on-nodes test (partial db/kill! (:db test)))
    (recover! test)))
 
+(defn power-off!
+  "Power loss on this node, for --lazyfs: SIGKILLs VoltDB, waits until it has
+  exited, so no write of its can land after the next step, then drops every
+  write LazyFS holds that was not fsynced. Returns the files VoltDB modified
+  under voltdbroot since the last power loss: voltdbroot is not on LazyFS,
+  so a real power loss could also lose those writes and this one cannot."
+  [test node]
+  (c/su
+    (info "Power loss on" node)
+    (c/exec :bash :-c "pkill -KILL -f '[p]lacementgroup' || true")
+    (await-fn (fn gone? []
+                (when (= "running"
+                         (c/exec :bash :-c
+                                 "pgrep -f '[p]lacementgroup' >/dev/null && echo running || echo gone"))
+                  (throw+ {:type ::still-running, :node node})))
+              {:retry-interval 200
+               :timeout        30000
+               :log-message    "Waiting for VoltDB to exit"})
+    (let [writes (lazyfs/voltdbroot-writes base-dir)]
+      (lazyfs/lose-unfsynced-writes! base-dir)
+      writes)))
+
 (defn sql-cmd!
   "Takes an SQL query and runs it on the local node via sqlcmd"
   [query]

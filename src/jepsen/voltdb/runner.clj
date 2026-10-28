@@ -53,7 +53,7 @@
   "All nemesis faults we know about."
   #{:partition :packet :clock :pause :kill :rando :cluster-restart
     :file-corruption :membership :snapshot-io-error :client-response-delay
-    :promotion-delay :rejoin-kill :replay-delay :replay-error})
+    :promotion-delay :rejoin-kill :replay-delay :replay-error :power-loss})
 
 (def corruptible-dirs
   "Directories (under the voltdbroot, or the LazyFS mount with --lazyfs) whose files the file-corruption nemesis
@@ -179,7 +179,11 @@
 
    [nil "--byteman" "Attach the Byteman agent (listener on localhost:9091) to every VoltDB server JVM, so rules from resources/byteman can be loaded mid-test. Off by default; with no rules loaded it should not change behaviour."]
 
-   [nil "--lazyfs" "Put the command log and snapshots on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root."]
+   [nil "--lazyfs" "Put the command log and snapshots on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root. --nemesis power-loss turns this on."]
+
+   [nil "--node-count NUMBER" "Run on only the first NUMBER of the given nodes, e.g. a 3-node cluster from a 5-node pool."
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive integer."]]
 
    ["-l" "--license FILE" "Path to the VoltDB license file on the control node"
     :default "license.xml"]
@@ -366,7 +370,11 @@
   (let [; Byteman faults need the agent on the servers
         byteman-on    (filter (set (:nemesis opts)) (keys byteman-faults/faults))
         opts          (cond-> opts
-                        (seq byteman-on) (assoc :byteman true))
+                        (seq byteman-on) (assoc :byteman true)
+                        ; Power loss drops LazyFS's unsynced writes
+                        ((set (:nemesis opts)) :power-loss) (assoc :lazyfs true)
+                        (:node-count opts) (update :nodes
+                                                   #(vec (take (:node-count opts) %))))
         workload-name (:workload opts)
         ; Right now workloads construct entire test maps. We'll refactor this
         ; in the next commit.

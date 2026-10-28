@@ -148,8 +148,8 @@
     (fs [_] #{:await-up})))
 
 (defn recovery-checker
-  "Fails the test when a recovery step left nodes down: any :await-up or
-  :cluster-restart op whose value carries :still-down. Data checks can pass
+  "Fails the test when a recovery step left nodes down: any :await-up,
+  :cluster-restart or :power-loss op whose value carries :still-down. Data checks can pass
   on the surviving nodes, so without this a green result would not establish
   that the cluster recovered. Kept separate from the workload checker so the
   two outcomes stay distinguishable."
@@ -158,7 +158,7 @@
     (check [this test history opts]
       (let [stuck (->> history
                        (filter #(and (= :nemesis (:process %))
-                                     (#{:await-up :cluster-restart} (:f %))
+                                     (#{:await-up :cluster-restart :power-loss} (:f %))
                                      (map? (:value %))
                                      (:still-down (:value %))))
                        (map (fn [op] {:f (:f op)
@@ -176,6 +176,31 @@
    :generator nil
    :perf #{}})
 
+(defn start-all-and-await!
+  "Starts VoltDB on every node, which recovers the cluster from the command
+  log, and blocks until all nodes answer client connections. Returns
+  {:recovered-in-ms n}, counted from start-ns, or {:still-down nodes} at the
+  timeout (:await-up-timeout opts, default 600 s)."
+  [test opts start-ns]
+  (info "Starting VoltDB on every node (recovery from the command log)")
+  (c/on-nodes test (partial db/start! (:db test)))
+  (let [timeout-ms (* 1000 (:await-up-timeout opts 600))
+        deadline   (+ start-ns (* timeout-ms 1000000))
+        nodes      (set (:nodes test))]
+    (loop []
+      (let [down (set/difference nodes (set (vc/up-nodes test)))]
+        (cond (empty? down)
+              {:recovered-in-ms (long (/ (- (System/nanoTime) start-ns)
+                                         1000000))}
+
+              (< deadline (System/nanoTime))
+              (do (warn "Nodes still down after cluster restart:" down)
+                  {:still-down down})
+
+              :else
+              (do (Thread/sleep 5000)
+                  (recur)))))))
+
 (defn cluster-restart-nemesis
   "Kills VoltDB on every node at once, waits a little, then starts every node
   again, which recovers the cluster from the command log, and blocks until
@@ -192,30 +217,11 @@
 
     (invoke! [this test op]
       (assert (= :cluster-restart (:f op)))
-      (let [db       (:db test)
-            start-ns (System/nanoTime)]
+      (let [start-ns (System/nanoTime)]
         (info "Killing VoltDB on every node")
-        (c/on-nodes test (partial db/kill! db))
+        (c/on-nodes test (partial db/kill! (:db test)))
         (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
-        (info "Starting VoltDB on every node (recovery from the command log)")
-        (c/on-nodes test (partial db/start! db))
-        (let [timeout-ms (* 1000 (:await-up-timeout opts 600))
-              deadline   (+ start-ns (* timeout-ms 1000000))
-              nodes      (set (:nodes test))]
-          (loop []
-            (let [down (set/difference nodes (set (vc/up-nodes test)))]
-              (cond (empty? down)
-                    (assoc op :value {:recovered-in-ms
-                                      (long (/ (- (System/nanoTime) start-ns)
-                                               1000000))})
-
-                    (< deadline (System/nanoTime))
-                    (do (warn "Nodes still down after cluster restart:" down)
-                        (assoc op :value {:still-down down}))
-
-                    :else
-                    (do (Thread/sleep 5000)
-                        (recur))))))))
+        (assoc op :value (start-all-and-await! test opts start-ns))))
 
     (teardown! [this test])
 
@@ -232,6 +238,45 @@
      :perf      #{{:name  "cluster-restart"
                    :fs    #{:cluster-restart}
                    :color "#E97A4F"}}}))
+
+(defn power-loss-nemesis
+  "Power loss on every node at once, for --lazyfs: kills VoltDB everywhere,
+  drops every write LazyFS holds that was not fsynced, then restarts and
+  recovers the cluster as cluster-restart does. With a synchronous command
+  log, every acknowledged write was fsynced first, so none may be lost.
+
+  Responds to {:f :power-loss}. The op value is cluster-restart's, plus
+  :voltdbroot-writes: per node, the files VoltDB modified under voltdbroot
+  (not on LazyFS, so not lost here) since the last power loss."
+  [opts]
+  (reify n/Nemesis
+    (setup! [this test] this)
+
+    (invoke! [this test op]
+      (assert (= :power-loss (:f op)))
+      (let [start-ns (System/nanoTime)
+            writes   (c/on-nodes test voltdb/power-off!)]
+        (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
+        (assoc op :value (assoc (start-all-and-await! test opts start-ns)
+                                :voltdbroot-writes
+                                (into (sorted-map)
+                                      (filter (comp seq val) writes))))))
+
+    (teardown! [this test])
+
+    n/Reflection
+    (fs [_] #{:power-loss})))
+
+(defn power-loss-package
+  "Package for the :power-loss fault."
+  [opts]
+  (when ((:faults opts) :power-loss)
+    {:nemesis   (power-loss-nemesis opts)
+     :generator (->> (repeat {:type :info, :f :power-loss})
+                     (gen/stagger (:interval opts)))
+     :perf      #{{:name  "power-loss"
+                   :fs    #{:power-loss}
+                   :color "#C0392B"}}}))
 
 (defn preinstalled-bitflip
   "jepsen.nemesis/bitflip, minus its setup!, which install-archive!s the
@@ -268,6 +313,7 @@
         ; TODO: custom nemeses--port these over from jepsen.voltdb.
         (concat [(rando-package opts)
                  (cluster-restart-package opts)
+                 (power-loss-package opts)
                  (byteman-faults/package opts)
                  (membership/package opts)
                  (await-up-package opts)])
