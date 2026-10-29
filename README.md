@@ -257,6 +257,15 @@ acknowledges it, so no acknowledged write may be lost; the workload checkers
 verify that. The op's value records `:recovered-in-ms`, or `:still-down`
 nodes, which fail the test.
 
+**Setup fsyncs voltdbroot (ENG-30442).** VoltDB does not fsync the files
+`voltdb init` and catalog updates write (`.initialized`, `license.xml`,
+`config/`, export cursors). A kernel writes them back within about 30 s, but
+LazyFS never does, so without this every node fails the first power loss with
+"The database root directory has changed". Once setup has loaded the
+procedures, every node fsyncs every file under voltdbroot, standing in for
+that writeback. Files rewritten by each recovery are not fsynced, so a power
+loss soon after a restart still exercises them.
+
 `--node-count N` runs on the first N of the nodes given with `-n`, e.g. a
 3-node cluster from the lab's 5-node pool. It is applied before
 `--concurrency 4n` is resolved.

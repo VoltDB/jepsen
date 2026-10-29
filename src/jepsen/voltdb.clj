@@ -428,7 +428,12 @@
         ; Finish procedures
         @procedures
         (when (= node (jepsen/primary test))
-          (load-stored-procedures! node))))
+          (load-stored-procedures! node))
+        ; --lazyfs: write back what init and the procedure load's catalog
+        ; update left unsynced, once that update is done on every node
+        (when (:lazyfs test)
+          (jepsen/synchronize test)
+          (lazyfs/sync-voltdbroot! base-dir))))
 
     ; BZ TODO need proper shut-down before killing processes....
     (teardown! [this test node]

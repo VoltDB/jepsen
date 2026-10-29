@@ -158,6 +158,17 @@
     (report! base-dir)
     (lazyfs/lose-unfsynced-writes! m)))
 
+(defn sync-voltdbroot!
+  "fsyncs every file under voltdbroot. VoltDB does not fsync what voltdb init
+  and catalog updates write there (.initialized, config/, license.xml,
+  export cursors), so a power loss before a kernel would have written them
+  back leaves a node that refuses to start. LazyFS never writes them back on
+  its own, so we stand in for the kernel's writeback once setup is done."
+  [base-dir]
+  (c/su
+    (info "fsyncing every file under" (mount-dir base-dir))
+    (c/exec :find (mount-dir base-dir) :-type :f :-exec :sync (c/lit "{} +"))))
+
 (defn log-config-file
   "VoltDB's server log config for --lazyfs runs, outside the mount."
   [base-dir]
