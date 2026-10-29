@@ -4,11 +4,13 @@
   fsynced. Dropping that cache after killing VoltDB loses exactly what a power
   loss would.
 
-  LazyFS is mounted at <base-dir>/lazyfs, and the deployment points the
-  command log, command log snapshot and snapshot paths into it (see
-  `deployment-paths`). It does not wrap voltdbroot itself: LazyFS has no statfs,
-  so the mount reports 0 bytes free, and VoltDB refuses to start when
-  voltdbroot has under 1 MB free (FsUtils.ensureMinimalFreeSpace).
+  LazyFS is mounted at <base-dir>/voltdbroot, so everything VoltDB writes
+  there (config, catalog, command log, snapshots, export cursors) can be lost.
+  Upstream LazyFS has no statfs, so its mount reports 0 bytes free and VoltDB
+  refuses to start (FsUtils.ensureMinimalFreeSpace); we build it with
+  resources/lazyfs/statfs.patch, which passes statfs through to the backing
+  directory. VoltDB's own log is written outside the mount (see `log-config!`),
+  so a power loss cannot drop the log we read afterwards.
 
   Builds on jepsen.lazyfs, with our own install and mount: Jepsen's install
   needs the Debian 13 package libfuse3-4, and both build and mount in the fixed
@@ -23,22 +25,22 @@
             [slingshot.slingshot :refer [throw+]]))
 
 (def version
-  "LazyFS release we build, and its commit. 0.3.1 adds the torn-op and
-  torn-seq faults that Jepsen's default (0.3.0) lacks."
-  {:tag "0.3.1", :commit "045a0b3a1126725e693934e29d3ba15e08cc39ec"})
+  "LazyFS release we build, its commit, and our patches to it, from
+  resources/lazyfs. 0.3.1 adds the torn-op and torn-seq faults that Jepsen's
+  default (0.3.0) lacks."
+  {:tag     "0.3.1"
+   :commit  "045a0b3a1126725e693934e29d3ba15e08cc39ec"
+   :patches ["statfs.patch"]})
+
+(def local-patch-dir
+  "Where our LazyFS patches are, on the control node."
+  "resources/lazyfs")
 
 (defn mount-dir
-  "Where LazyFS is mounted on each node."
+  "Where LazyFS is mounted on each node: VoltDB's voltdbroot, whose default
+  paths hold the command log and snapshots."
   [base-dir]
-  (str base-dir "/lazyfs"))
-
-(defn deployment-paths
-  "The <paths> children that put VoltDB's durable files on LazyFS."
-  [base-dir]
-  (let [d (mount-dir base-dir)]
-    [[:commandlog         {:path (str d "/command_log")}]
-     [:commandlogsnapshot {:path (str d "/command_log_snapshot")}]
-     [:snapshots          {:path (str d "/snapshots")}]]))
+  (str base-dir "/voltdbroot"))
 
 (def cache-size
   "LazyFS cache size. LazyFS allocates all of it up front."
@@ -65,15 +67,18 @@
 
 (defn lazyfs-map
   "jepsen.lazyfs's description of our mount: its backing directory, fifo,
-  config and log all live in <base-dir>/lazyfs.lazyfs."
+  config and log all live in <base-dir>/voltdbroot.lazyfs."
   [base-dir]
   (lazyfs/lazyfs {:dir (mount-dir base-dir)}))
 
 (defn install-dir
   "Where LazyFS is built. Per host, since /opt is shared between lab nodes,
-  and per commit, so a build is reused by later runs."
+  and per commit and patch set, so a build is reused by later runs."
   []
-  (str "/opt/jepsen-lazyfs/" (c/exec :hostname) "/" (:commit version)))
+  (str "/opt/jepsen-lazyfs/" (c/exec :hostname) "/" (:commit version)
+       (->> (:patches version)
+            (map #(str "+" (str/replace % #"\.patch$" "")))
+            str/join)))
 
 (defn install!
   "Builds the pinned LazyFS on this node, unless that build is already there.
@@ -96,26 +101,24 @@
             (c/exec :git :clone :-q lazyfs/repo-url dir)
             (c/cd dir
                   (c/exec :git :checkout :-q (:commit version))
+                  (doseq [p (:patches version)]
+                    (c/upload (str local-patch-dir "/" p) (str dir "/" p))
+                    (c/exec :git :apply p))
                   (c/cd "libs/libpcache" (c/exec "./build.sh"))
                   (c/cd "lazyfs" (c/exec "./build.sh")))))
       dir)))
 
-(defn marker-file
-  "Touched at mount and at every power loss, so voltdbroot-writes can find
-  what VoltDB wrote outside LazyFS in between."
-  [base-dir]
-  (str (:lazyfs-dir (lazyfs-map base-dir)) "/voltdbroot-marker"))
-
 (defn mount!
   "Installs LazyFS and mounts it at (mount-dir base-dir), empty. Call after
-  the kit is unpacked, which replaces base-dir."
+  the kit is unpacked, which replaces base-dir, and before voltdb init, which
+  fills voltdbroot."
   [base-dir]
   (let [install (install!)
         {:keys [dir data-dir config-file log-file] :as m} (lazyfs-map base-dir)]
     (c/su
       (info "Mounting LazyFS at" dir)
       (c/exec :mkdir :-p dir data-dir)
-      (c/exec :touch log-file (marker-file base-dir))
+      (c/exec :touch log-file)
       (cu/write-file! (config m) config-file)
       ; The mount script must run from the lazyfs directory
       (c/cd (str install "/lazyfs")
@@ -146,31 +149,63 @@
       ; LazyFS reads the fifo on its own thread; let it log before we copy
       (Thread/sleep 1000))))
 
+(def durable-dirs
+  "voltdbroot's directories that VoltDB fsyncs itself, and whose unsynced
+  writes a power loss drops: the command log and snapshots."
+  ["command_log" "command_log_snapshot" "snapshots"])
+
+(defn sync-config!
+  "fsyncs every file under voltdbroot outside `durable-dirs`. VoltDB does not
+  fsync what voltdb init, catalog updates and recovery write there
+  (.initialized, config/, license.xml, export cursors; ENG-30442), so losing
+  those writes leaves a node that refuses to start, or a recovery that hangs.
+  A kernel would usually have written them back by the next power loss;
+  LazyFS never does, so we stand in for that writeback just before dropping
+  the cache. Call after VoltDB is killed."
+  [base-dir]
+  (let [root (mount-dir base-dir)]
+    (c/su
+      (info "fsyncing voltdbroot outside" (str/join ", " durable-dirs))
+      (c/exec :find root
+              :-type :d (c/lit "\\(")
+              (->> durable-dirs
+                   (map #(str "-path " root "/" %))
+                   (str/join " -o ")
+                   c/lit)
+              (c/lit "\\)") :-prune
+              :-o :-type :f :-exec :sync (c/lit "{} +")))))
+
 (defn lose-unfsynced-writes!
   "Drops every write LazyFS holds that was not fsynced, as a power loss
   would. Logs the files that held unsynced data first. Kill VoltDB before
-  calling this: a write that lands after the drop survives."
-  [base-dir]
+  calling this: a write that lands after the drop survives. Unless
+  lose-config? is true, first fsyncs everything outside the command log and
+  snapshots (see `sync-config!`)."
+  [base-dir lose-config?]
   (let [m (lazyfs-map base-dir)]
+    (when-not lose-config?
+      (sync-config! base-dir))
     (report! base-dir)
     (lazyfs/lose-unfsynced-writes! m)))
 
-(defn voltdbroot-writes
-  "Files under voltdbroot, which is not on LazyFS, modified since the mount
-  or the last call: writes a real power loss could lose but this one cannot.
-  Excludes the logs. Touches the marker for the next call."
+(defn log-config-file
+  "VoltDB's server log config for --lazyfs runs, outside the mount."
   [base-dir]
-  (c/su
-    (let [marker (marker-file base-dir)
-          files  (->> (c/exec :find (str base-dir "/voltdbroot")
-                              :-type :f :-newer marker
-                              :-not :-path (str base-dir "/voltdbroot/log/*"))
-                      str/split-lines
-                      (remove str/blank?)
-                      sort
-                      vec)]
-      (c/exec :touch marker)
-      files)))
+  (str base-dir "/voltserver-lazyfs.properties"))
+
+(defn log-config!
+  "Writes the kit's log4j2/voltserver.properties with the log directory set
+  to <base-dir>/log. VoltDB puts its log in voltdbroot/log, on LazyFS, where
+  a power loss would drop whatever log4j had not fsynced, which is most of it.
+  Call after the kit is unpacked."
+  [base-dir]
+  (c/exec :sed (str "s|^property.log.dir *=.*|property.log.dir = " base-dir "/log|")
+          (str base-dir "/log4j2/voltserver.properties")
+          :> (log-config-file base-dir)))
+
+(def log-config-env
+  "bin/voltdb's environment variable naming the server log config file."
+  :LOG4J_VOLTSERVER_PATH)
 
 (defn log-files
   "LazyFS's own log, for the test's log files. Reports cache usage into it

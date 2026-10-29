@@ -1,0 +1,47 @@
+diff --git a/lazyfs/include/lazyfs/lazyfs.hpp b/lazyfs/include/lazyfs/lazyfs.hpp
+index 5fcff7c..a1bb8a5 100644
+--- a/lazyfs/include/lazyfs/lazyfs.hpp
++++ b/lazyfs/include/lazyfs/lazyfs.hpp
+@@ -344,6 +344,8 @@ class LazyFS : public Fusepp::Fuse<LazyFS> {
+ 
+     static int lfs_access (const char* path, int mask);
+ 
++    static int lfs_statfs (const char* path, struct statvfs* stbuf);
++
+     static int lfs_getattr (const char*, struct stat*, struct fuse_file_info*);
+ 
+     static int lfs_readdir (const char* path,
+diff --git a/lazyfs/src/lazyfs.cpp b/lazyfs/src/lazyfs.cpp
+index 4709ff3..a7f6c09 100644
+--- a/lazyfs/src/lazyfs.cpp
++++ b/lazyfs/src/lazyfs.cpp
+@@ -19,6 +19,7 @@
+ #include <spdlog/spdlog.h>
+ #include <string>
+ #include <sys/stat.h>
++#include <sys/statvfs.h>
+ #include <sys/types.h>
+ #include <thread>
+ #include <tuple>
+@@ -1878,6 +1879,21 @@ int LazyFS::lfs_symlink (const char* from, const char* to) {
+     return 0;
+ }
+ 
++int LazyFS::lfs_statfs (const char* path, struct statvfs* stbuf) {
++
++    if (this_ ()->FSConfig->log_all_operations) {
++        spdlog::info ("[lazyfs.ops]: {}(path={})", __FUNCTION__, path);
++    }
++
++    // Report the backing filesystem's sizes, as passthrough FUSE filesystems
++    // do. Data still in the cache is not counted against free space.
++    int res = statvfs (path, stbuf);
++    if (res == -1)
++        return -errno;
++
++    return 0;
++}
++
+ int LazyFS::lfs_access (const char* path, int mask) {
+ 
+     this_ ()->trigger_crash_fault ("access", "before", path, "", CLEAR);

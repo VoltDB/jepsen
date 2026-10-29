@@ -135,10 +135,8 @@
                             kfac)} ]
                 ( if (= sph nil) clusterSpec
                                  (merge clusterSpec {:sitesperhost sph}) ) )]
-     ; --lazyfs: the command log and snapshots go on LazyFS
-     (cond-> [:paths {}
-              [:voltdbroot {:path base-dir}]]
-       (:lazyfs test) (into (lazyfs/deployment-paths base-dir)))
+     [:paths {}
+      [:voltdbroot {:path base-dir}]]
      ; We need to choose a heartbeat high enough so that we can spam
      ; isolated nodes with requests *before* they kill themselves
      ; but low enough that a new majority is elected and performs
@@ -166,9 +164,16 @@
        [:property {:name "outdir"} export-csv-dir]
        ]]])))
 
+(defn voltdb-env
+  "Environment for bin/voltdb. With --lazyfs, VoltDB logs outside the mount."
+  [test]
+  (cond-> {:JAVA_HOME (db-java-home)}
+    (:lazyfs test) (assoc lazyfs/log-config-env
+                          (lazyfs/log-config-file base-dir))))
+
 (defn init-db!
   "run voltdb init"
-  [node]
+  [test node]
   (info "Initializing voltdb")
           (c/cd base-dir
               ; We think there's a bug that breaks sqlcmd if it runs early in
@@ -180,8 +185,7 @@
                                  );"
                       init-schema-file "init-schema"]
                   (cu/write-file! init-schema init-schema-file)
-                  (c/exec (c/env {"JAVA_HOME" (db-java-home)
-                                  })
+                  (c/exec (c/env (voltdb-env test))
                           "bin/voltdb"
                           :init
                           :-s init-schema-file
@@ -196,10 +200,14 @@
           (c/cd base-dir
                 (c/upload (:license test) (str base-dir "/license.xml"))
                 (cu/write-file! (deployment-xml test) "deployment.xml")
-                (init-db! node)
-                ; this is so jepsen can find the log in a standard place
                 (c/exec :mkdir :-p "log")
-                (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log"))))
+                (when (:lazyfs test)
+                  (lazyfs/log-config! base-dir))
+                (init-db! test node)
+                ; this is so jepsen can find the log in a standard place.
+                ; --lazyfs already writes it there.
+                (when-not (:lazyfs test)
+                  (c/exec :ln :-f :-s (str base-dir "/voltdbroot/log/volt.log") (str base-dir "/log/volt.log")))))
 
 (defn await-log
   "Blocks until voltdb.log contains the given string."
@@ -248,7 +256,7 @@
   [test]
           (c/cd base-dir
                 (info "Starting voltdb")
-                (cu/start-daemon! {:env (cond-> {:JAVA_HOME (db-java-home)}
+                (cu/start-daemon! {:env (cond-> (voltdb-env test)
                                           ; --byteman: attach the agent to the
                                           ; server JVM (bin/voltdb appends
                                           ; VOLTDB_OPTS to its JVM arguments)
@@ -290,9 +298,9 @@
 (defn power-off!
   "Power loss on this node, for --lazyfs: SIGKILLs VoltDB, waits until it has
   exited, so no write of its can land after the next step, then drops every
-  write LazyFS holds that was not fsynced. Returns the files VoltDB modified
-  under voltdbroot since the last power loss: voltdbroot is not on LazyFS,
-  so a real power loss could also lose those writes and this one cannot."
+  write LazyFS holds that was not fsynced. Outside the command log and
+  snapshots, unsynced writes are fsynced first unless --lose-unsynced-config
+  (ENG-30442)."
   [test node]
   (c/su
     (info "Power loss on" node)
@@ -305,9 +313,7 @@
               {:retry-interval 200
                :timeout        30000
                :log-message    "Waiting for VoltDB to exit"})
-    (let [writes (lazyfs/voltdbroot-writes base-dir)]
-      (lazyfs/lose-unfsynced-writes! base-dir)
-      writes)))
+    (lazyfs/lose-unfsynced-writes! base-dir (:lose-unsynced-config test))))
 
 (defn sql-cmd!
   "Takes an SQL query and runs it on the local node via sqlcmd"
@@ -398,7 +404,7 @@
       (when (:byteman test)
         (byteman/install! base-dir))
       ; LazyFS goes in after the kit, which replaces base-dir, and before
-      ; init, which creates the command log and snapshot directories in it
+      ; init, which fills voltdbroot
       (when (:lazyfs test)
         (lazyfs/mount! base-dir))
 
