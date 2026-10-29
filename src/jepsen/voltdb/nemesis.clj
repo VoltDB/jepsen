@@ -309,12 +309,12 @@
     (fs [_] #{:torn-power-loss})))
 
 (defn restored-snapshot
-  "The nonce of the snapshot this node last restored from, per volt.log, or
-  nil."
+  "The nonce of the snapshot this node's running VoltDB restored from, per
+  volt.log, or nil when it restored none. The log spans restarts, so only
+  lines after the last process start count."
   []
-  (let [line (c/exec :bash :-c
-                     (str "grep -h 'Restoring from path:' " voltdb/base-dir
-                          "/log/volt.log | tail -1 || true"))]
+  (let [line (c/exec :awk "/PID of this process/ {r = \"\"} /Restoring from path:/ {r = $0} END {print r}"
+                     (str voltdb/base-dir "/log/volt.log"))]
     (second (re-find #"with nonce: (\S+)" line))))
 
 (defn snapshot-power-loss-nemesis
