@@ -298,7 +298,9 @@
 (defn power-off!
   "Power loss on this node, for --lazyfs: SIGKILLs VoltDB, waits until it has
   exited, so no write of its can land after the next step, then drops every
-  write LazyFS holds that was not fsynced."
+  write LazyFS holds that was not fsynced. Outside the command log and
+  snapshots, unsynced writes are fsynced first unless --lose-unsynced-config
+  (ENG-30442)."
   [test node]
   (c/su
     (info "Power loss on" node)
@@ -311,7 +313,7 @@
               {:retry-interval 200
                :timeout        30000
                :log-message    "Waiting for VoltDB to exit"})
-    (lazyfs/lose-unfsynced-writes! base-dir)))
+    (lazyfs/lose-unfsynced-writes! base-dir (:lose-unsynced-config test))))
 
 (defn sql-cmd!
   "Takes an SQL query and runs it on the local node via sqlcmd"
@@ -428,12 +430,7 @@
         ; Finish procedures
         @procedures
         (when (= node (jepsen/primary test))
-          (load-stored-procedures! node))
-        ; --lazyfs: write back what init and the procedure load's catalog
-        ; update left unsynced, once that update is done on every node
-        (when (:lazyfs test)
-          (jepsen/synchronize test)
-          (lazyfs/sync-voltdbroot! base-dir))))
+          (load-stored-procedures! node))))
 
     ; BZ TODO need proper shut-down before killing processes....
     (teardown! [this test node]

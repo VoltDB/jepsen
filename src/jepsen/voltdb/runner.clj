@@ -177,6 +177,8 @@
 
    [nil "--lazyfs" "Put voltdbroot (command log, snapshots, config) on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root. --nemesis power-loss turns this on."]
 
+   [nil "--lose-unsynced-config" "With --lazyfs, a power loss also drops unsynced writes outside the command log and snapshots (config, catalog, .initialized, export cursors). Off by default: VoltDB never fsyncs those (ENG-30442), so turning this on mostly re-finds that bug."]
+
    [nil "--node-count NUMBER" "Run on only the first NUMBER of the given nodes, e.g. a 3-node cluster from a 5-node pool."
     :parse-fn parse-long
     :validate [pos? "Must be a positive integer."]]

@@ -257,14 +257,18 @@ acknowledges it, so no acknowledged write may be lost; the workload checkers
 verify that. The op's value records `:recovered-in-ms`, or `:still-down`
 nodes, which fail the test.
 
-**Setup fsyncs voltdbroot (ENG-30442).** VoltDB does not fsync the files
-`voltdb init` and catalog updates write (`.initialized`, `license.xml`,
-`config/`, export cursors). A kernel writes them back within about 30 s, but
-LazyFS never does, so without this every node fails the first power loss with
-"The database root directory has changed". Once setup has loaded the
-procedures, every node fsyncs every file under voltdbroot, standing in for
-that writeback. Files rewritten by each recovery are not fsynced, so a power
-loss soon after a restart still exercises them.
+**Only the command log and snapshots lose writes, by default (ENG-30442).**
+VoltDB does not fsync the files `voltdb init`, catalog updates and recovery
+write under voltdbroot (`.initialized`, `license.xml`, `config/`, export
+cursors). A kernel writes them back within about 30 s; LazyFS never does.
+Losing them leaves a node that fails with "The database root directory has
+changed" (after init), or an empty `catalog.jar` and `deployment.yaml` that
+VoltDB accepts as a default deployment, after which command log replay hangs
+with no error (after DDL). Every recovery and the workload's DDL rewrite those
+files seconds before the next power loss, so before step 2 every node fsyncs
+every file outside `command_log/`, `command_log_snapshot/` and `snapshots/`,
+standing in for that writeback. The test then checks what VoltDB does fsync.
+`--lose-unsynced-config` skips that fsync, to check a fix for ENG-30442.
 
 `--node-count N` runs on the first N of the nodes given with `-n`, e.g. a
 3-node cluster from the lab's 5-node pool. It is applied before

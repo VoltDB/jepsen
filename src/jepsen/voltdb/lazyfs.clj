@@ -149,25 +149,44 @@
       ; LazyFS reads the fifo on its own thread; let it log before we copy
       (Thread/sleep 1000))))
 
+(def durable-dirs
+  "voltdbroot's directories that VoltDB fsyncs itself, and whose unsynced
+  writes a power loss drops: the command log and snapshots."
+  ["command_log" "command_log_snapshot" "snapshots"])
+
+(defn sync-config!
+  "fsyncs every file under voltdbroot outside `durable-dirs`. VoltDB does not
+  fsync what voltdb init, catalog updates and recovery write there
+  (.initialized, config/, license.xml, export cursors; ENG-30442), so losing
+  those writes leaves a node that refuses to start, or a recovery that hangs.
+  A kernel would usually have written them back by the next power loss;
+  LazyFS never does, so we stand in for that writeback just before dropping
+  the cache. Call after VoltDB is killed."
+  [base-dir]
+  (let [root (mount-dir base-dir)]
+    (c/su
+      (info "fsyncing voltdbroot outside" (str/join ", " durable-dirs))
+      (c/exec :find root
+              :-type :d (c/lit "\\(")
+              (->> durable-dirs
+                   (map #(str "-path " root "/" %))
+                   (str/join " -o ")
+                   c/lit)
+              (c/lit "\\)") :-prune
+              :-o :-type :f :-exec :sync (c/lit "{} +")))))
+
 (defn lose-unfsynced-writes!
   "Drops every write LazyFS holds that was not fsynced, as a power loss
   would. Logs the files that held unsynced data first. Kill VoltDB before
-  calling this: a write that lands after the drop survives."
-  [base-dir]
+  calling this: a write that lands after the drop survives. Unless
+  lose-config? is true, first fsyncs everything outside the command log and
+  snapshots (see `sync-config!`)."
+  [base-dir lose-config?]
   (let [m (lazyfs-map base-dir)]
+    (when-not lose-config?
+      (sync-config! base-dir))
     (report! base-dir)
     (lazyfs/lose-unfsynced-writes! m)))
-
-(defn sync-voltdbroot!
-  "fsyncs every file under voltdbroot. VoltDB does not fsync what voltdb init
-  and catalog updates write there (.initialized, config/, license.xml,
-  export cursors), so a power loss before a kernel would have written them
-  back leaves a node that refuses to start. LazyFS never writes them back on
-  its own, so we stand in for the kernel's writeback once setup is done."
-  [base-dir]
-  (c/su
-    (info "fsyncing every file under" (mount-dir base-dir))
-    (c/exec :find (mount-dir base-dir) :-type :f :-exec :sync (c/lit "{} +"))))
 
 (defn log-config-file
   "VoltDB's server log config for --lazyfs runs, outside the mount."
