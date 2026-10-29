@@ -13,7 +13,8 @@
   Builds on jepsen.lazyfs, with our own install and mount: Jepsen's install
   needs the Debian 13 package libfuse3-4, and both build and mount in the fixed
   directory /opt/jepsen/lazyfs, which the lab nodes share."
-  (:require [clojure.tools.logging :refer [info]]
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :refer [info]]
             [jepsen [control :as c]
                     [lazyfs :as lazyfs]
                     [util :refer [await-fn meh]]]
@@ -99,6 +100,12 @@
                   (c/cd "lazyfs" (c/exec "./build.sh")))))
       dir)))
 
+(defn marker-file
+  "Touched at mount and at every power loss, so voltdbroot-writes can find
+  what VoltDB wrote outside LazyFS in between."
+  [base-dir]
+  (str (:lazyfs-dir (lazyfs-map base-dir)) "/voltdbroot-marker"))
+
 (defn mount!
   "Installs LazyFS and mounts it at (mount-dir base-dir), empty. Call after
   the kit is unpacked, which replaces base-dir."
@@ -108,7 +115,7 @@
     (c/su
       (info "Mounting LazyFS at" dir)
       (c/exec :mkdir :-p dir data-dir)
-      (c/exec :touch log-file)
+      (c/exec :touch log-file (marker-file base-dir))
       (cu/write-file! (config m) config-file)
       ; The mount script must run from the lazyfs directory
       (c/cd (str install "/lazyfs")
@@ -138,6 +145,32 @@
       (meh (lazyfs/fifo! m "lazyfs::unsynced-data-report"))
       ; LazyFS reads the fifo on its own thread; let it log before we copy
       (Thread/sleep 1000))))
+
+(defn lose-unfsynced-writes!
+  "Drops every write LazyFS holds that was not fsynced, as a power loss
+  would. Logs the files that held unsynced data first. Kill VoltDB before
+  calling this: a write that lands after the drop survives."
+  [base-dir]
+  (let [m (lazyfs-map base-dir)]
+    (report! base-dir)
+    (lazyfs/lose-unfsynced-writes! m)))
+
+(defn voltdbroot-writes
+  "Files under voltdbroot, which is not on LazyFS, modified since the mount
+  or the last call: writes a real power loss could lose but this one cannot.
+  Excludes the logs. Touches the marker for the next call."
+  [base-dir]
+  (c/su
+    (let [marker (marker-file base-dir)
+          files  (->> (c/exec :find (str base-dir "/voltdbroot")
+                              :-type :f :-newer marker
+                              :-not :-path (str base-dir "/voltdbroot/log/*"))
+                      str/split-lines
+                      (remove str/blank?)
+                      sort
+                      vec)]
+      (c/exec :touch marker)
+      files)))
 
 (defn log-files
   "LazyFS's own log, for the test's log files. Reports cache usage into it

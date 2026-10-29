@@ -53,7 +53,7 @@
   "All nemesis faults we know about."
   #{:partition :packet :clock :pause :kill :rando :cluster-restart
     :file-corruption :membership :snapshot-io-error :client-response-delay
-    :promotion-delay :rejoin-kill :replay-delay :replay-error})
+    :promotion-delay :rejoin-kill :replay-delay :replay-error :power-loss})
 
 (def corruptible-dirs
   "Directories (under the voltdbroot, or the LazyFS mount with --lazyfs) whose files the file-corruption nemesis
@@ -179,7 +179,11 @@
 
    [nil "--byteman" "Attach the Byteman agent (listener on localhost:9091) to every VoltDB server JVM, so rules from resources/byteman can be loaded mid-test. Off by default; with no rules loaded it should not change behaviour."]
 
-   [nil "--lazyfs" "Put the command log and snapshots on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root."]
+   [nil "--lazyfs" "Put the command log and snapshots on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root. --nemesis power-loss turns this on."]
+
+   [nil "--node-count NUMBER" "Run on only the first NUMBER of the given nodes, e.g. a 3-node cluster from a 5-node pool."
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive integer."]]
 
    ["-l" "--license FILE" "Path to the VoltDB license file on the control node"
     :default "license.xml"]
@@ -366,7 +370,9 @@
   (let [; Byteman faults need the agent on the servers
         byteman-on    (filter (set (:nemesis opts)) (keys byteman-faults/faults))
         opts          (cond-> opts
-                        (seq byteman-on) (assoc :byteman true))
+                        (seq byteman-on) (assoc :byteman true)
+                        ; Power loss drops LazyFS's unsynced writes
+                        ((set (:nemesis opts)) :power-loss) (assoc :lazyfs true))
         workload-name (:workload opts)
         ; Right now workloads construct entire test maps. We'll refactor this
         ; in the next commit.
@@ -464,13 +470,35 @@
     (for [n nemeses, w workloads, i (range (:test-count opts))]
       (voltdb-test (assoc opts :workload w, :nemesis n)))))
 
+(defn take-nodes
+  "--node-count: keeps only the first N of the given nodes."
+  [parsed]
+  (if-let [n (get-in parsed [:options :node-count])]
+    (update-in parsed [:options :nodes] #(vec (take n %)))
+    parsed))
+
+(defn opt-fn
+  "jepsen.cli/test-opt-fn, with take-nodes between parsing the nodes and
+  parsing the concurrency, so --concurrency 4n counts only the nodes the test
+  runs on."
+  [parsed]
+  (-> parsed
+      cli/rename-ssh-options
+      (cli/rename-options {:leave-db-running :leave-db-running?})
+      (cli/rename-options {:logging-json :logging-json?})
+      cli/parse-nodes
+      take-nodes
+      cli/parse-concurrency))
+
 (defn -main
   "Main entry point for the CLI. Takes CLI options and runs tests, launches a
   web server, analyzes results, etc."
   [& args]
-  (cli/run! (merge (cli/single-test-cmd {:test-fn voltdb-test
-                                         :opt-spec opt-spec})
+  (cli/run! (merge (cli/single-test-cmd {:test-fn  voltdb-test
+                                         :opt-spec opt-spec
+                                         :opt-fn*  opt-fn})
                    (cli/test-all-cmd {:tests-fn all-tests
-                                      :opt-spec opt-spec})
+                                      :opt-spec opt-spec
+                                      :opt-fn*  opt-fn})
                    (cli/serve-cmd))
             args))
