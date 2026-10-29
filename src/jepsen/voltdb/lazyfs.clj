@@ -188,17 +188,22 @@
   LazyFS never does, so we stand in for that writeback just before dropping
   the cache. Call after VoltDB is killed."
   [base-dir]
-  (let [root (mount-dir base-dir)]
+  (let [root (mount-dir base-dir)
+        find (str "find " root " -type d \\( "
+                  (->> durable-dirs
+                       (map #(str "-path " root "/" %))
+                       (str/join " -o "))
+                  " \\) -prune -o -type f ! -name '.fuse_hidden*'"
+                  " -exec sync {} + 2>&1")]
     (c/su
       (info "fsyncing voltdbroot outside" (str/join ", " durable-dirs))
-      (c/exec :find root
-              :-type :d (c/lit "\\(")
-              (->> durable-dirs
-                   (map #(str "-path " root "/" %))
-                   (str/join " -o ")
-                   c/lit)
-              (c/lit "\\)") :-prune
-              :-o :-type :f :-exec :sync (c/lit "{} +")))))
+      ; Files can vanish between find and sync, e.g. FUSE's .fuse_hidden
+      ; files for deleted-while-open files once VoltDB's handles close.
+      ; Only other errors fail.
+      (c/exec :bash :-c
+              (str "out=$(" find "); rc=$?; "
+                   "if [ $rc -ne 0 ] && echo \"$out\" | grep -v 'No such file or directory' | grep -q .; "
+                   "then echo \"$out\" >&2; exit $rc; fi")))))
 
 (defn lose-unfsynced-writes!
   "Drops every write LazyFS holds that was not fsynced, as a power loss
