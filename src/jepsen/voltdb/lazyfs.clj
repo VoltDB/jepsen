@@ -108,6 +108,21 @@
                   (c/cd "lazyfs" (c/exec "./build.sh")))))
       dir)))
 
+(defn history-file
+  "Earlier mounts' LazyFS logs, appended at each mount."
+  [m]
+  (str (:lazyfs-dir m) "/log-history"))
+
+(defn stdout-file
+  "LazyFS's stdout and stderr, across mounts."
+  [m]
+  (str (:lazyfs-dir m) "/stdout"))
+
+(defn exits-file
+  "When and how each LazyFS process exited."
+  [m]
+  (str (:lazyfs-dir m) "/exits"))
+
 (defn mount!
   "Installs LazyFS and mounts it at (mount-dir base-dir), empty. Call after
   the kit is unpacked, which replaces base-dir, and before voltdb init, which
@@ -118,12 +133,22 @@
     (c/su
       (info "Mounting LazyFS at" dir)
       (c/exec :mkdir :-p dir data-dir)
+      ; LazyFS truncates its log when it starts; keep earlier mounts' logs
+      (c/exec :bash :-c (str "cat " log-file " >> " (history-file m)
+                             " 2>/dev/null; true"))
       (c/exec :touch log-file)
       (cu/write-file! (config m) config-file)
-      ; The mount script must run from the lazyfs directory
+      ; What scripts/mount-lazyfs.sh runs, but in the foreground under a
+      ; shell that records how LazyFS exited: 137 is its own SIGKILL after
+      ; a torn write; anything else means it crashed or was killed.
       (c/cd (str install "/lazyfs")
-            (c/exec "scripts/mount-lazyfs.sh"
-                    :-c config-file :-m dir :-r data-dir))
+            (c/exec :bash :-c
+                    (str "nohup bash -c './build/lazyfs " dir
+                         " --config-path " config-file
+                         " -o allow_other -o modules=subdir -o subdir=" data-dir
+                         " -f >> " (stdout-file m) " 2>&1; rc=$?;"
+                         " echo \"$(date -u +%FT%T.%3N) LazyFS exited with $rc\" >> "
+                         (exits-file m) "' >/dev/null 2>&1 &")))
       (await-fn (fn check-mounted []
                   (or (re-find #"lazyfs" (c/exec :findmnt dir))
                       (throw+ {:type ::not-mounted, :dir dir})))
@@ -194,7 +219,7 @@
   (let [{:keys [config-file]} (lazyfs-map base-dir)]
     (= "running"
        (c/exec :bash :-c
-               (str "pgrep -f '[l]azyfs.*" config-file "' >/dev/null"
+               (str "pgrep -f '^[.]/build/lazyfs .*" config-file "' >/dev/null"
                     " && echo running || echo gone")))))
 
 (defn remount!
@@ -252,8 +277,10 @@
   :LOG4J_VOLTSERVER_PATH)
 
 (defn log-files
-  "LazyFS's own log, for the test's log files. Reports cache usage into it
-  first."
+  "LazyFS's own logs, for the test's log files: this mount's log, earlier
+  mounts' logs, stdout and stderr, and how each LazyFS process exited.
+  Reports cache usage into the log first."
   [base-dir]
   (report! base-dir)
-  [(:log-file (lazyfs-map base-dir))])
+  (let [m (lazyfs-map base-dir)]
+    [(:log-file m) (history-file m) (stdout-file m) (exits-file m)]))
