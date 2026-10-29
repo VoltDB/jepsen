@@ -19,6 +19,7 @@
             [jepsen.control.net   :as cn]
             [jepsen.voltdb.client :as vc]
             [jepsen.voltdb.byteman :as byteman]
+            [jepsen.voltdb.lazyfs :as lazyfs]
             [knossos.model        :as model]
             [clojure.data.xml     :as xml]
             [clojure.string       :as str]
@@ -134,8 +135,10 @@
                             kfac)} ]
                 ( if (= sph nil) clusterSpec
                                  (merge clusterSpec {:sitesperhost sph}) ) )]
-     [:paths {}
-      [:voltdbroot {:path base-dir}]]
+     ; --lazyfs: the command log and snapshots go on LazyFS
+     (cond-> [:paths {}
+              [:voltdbroot {:path base-dir}]]
+       (:lazyfs test) (into (lazyfs/deployment-paths base-dir)))
      ; We need to choose a heartbeat high enough so that we can spam
      ; isolated nodes with requests *before* they kill themselves
      ; but low enough that a new majority is elected and performs
@@ -363,11 +366,19 @@
   [url force-download?]
   (reify db/DB
     (setup! [this test node]
+      ; A LazyFS mount left by an earlier run would stop the kit from
+      ; replacing base-dir
+      (when (:lazyfs test)
+        (lazyfs/umount! base-dir))
       ; Download and unpack
       (install! node url force-download?)
       ; The Byteman jars and rules go in after the kit, which replaces base-dir
       (when (:byteman test)
         (byteman/install! base-dir))
+      ; LazyFS goes in after the kit, which replaces base-dir, and before
+      ; init, which creates the command log and snapshot directories in it
+      (when (:lazyfs test)
+        (lazyfs/mount! base-dir))
 
       ; Prepare stored procedures in parallel
       (let [procedures (future (when (= node (jepsen/primary test))
@@ -396,6 +407,8 @@
     ; BZ TODO need proper shut-down before killing processes....
     (teardown! [this test node]
       (db/kill! this test node)
+      (when (:lazyfs test)
+        (lazyfs/umount! base-dir))
       (c/su
        (c/exec :rm :-rf (c/lit (str base-dir "/*"))))
       (vc/kill-reconnect-threads!))
@@ -408,6 +421,8 @@
           [(str base-dir "/log/stdout.log")
            (str base-dir "/log/volt.log")
            (str base-dir "/deployment.xml")]
+          (when (:lazyfs test)
+            (lazyfs/log-files base-dir))
           export-files)))
 
     ; This is a debug version of "kill" to print debug info

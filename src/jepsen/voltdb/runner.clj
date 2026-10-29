@@ -14,6 +14,7 @@
             [jepsen.checker.timeline :as timeline]
             [jepsen.os.debian :as debian]
             [jepsen.voltdb :as voltdb]
+            [jepsen.voltdb.lazyfs :as lazyfs]
             [jepsen.voltdb [dirty-read :as dirty-read]
                            [export     :as export]
                            [multi      :as multi]
@@ -55,7 +56,7 @@
     :promotion-delay :rejoin-kill :replay-delay :replay-error})
 
 (def corruptible-dirs
-  "Directories under the voltdbroot whose files the file-corruption nemesis
+  "Directories (under the voltdbroot, or the LazyFS mount with --lazyfs) whose files the file-corruption nemesis
   may damage, by name, for --file-corruption-dirs."
   {:command-log          "command_log"
    :command-log-snapshot "command_log_snapshot"
@@ -69,7 +70,10 @@
   --truncate-mean-bytes) from the end of a random file."
   [opts]
   (for [dir   (:file-corruption-dirs opts)
-        :let  [path (str voltdb/base-dir "/voltdbroot/" (corruptible-dirs dir))]
+        :let  [root (if (:lazyfs opts)
+                      (lazyfs/mount-dir voltdb/base-dir)
+                      (str voltdb/base-dir "/voltdbroot"))
+               path (str root "/" (corruptible-dirs dir))]
         c     [{:type :bitflip
                 :file path
                 :probability (:bitflip-probability opts)}
@@ -174,6 +178,8 @@
    [nil "--force-download" "Re-download tarballs, even if cached locally"]
 
    [nil "--byteman" "Attach the Byteman agent (listener on localhost:9091) to every VoltDB server JVM, so rules from resources/byteman can be loaded mid-test. Off by default; with no rules loaded it should not change behaviour."]
+
+   [nil "--lazyfs" "Put the command log and snapshots on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root."]
 
    ["-l" "--license FILE" "Path to the VoltDB license file on the control node"
     :default "license.xml"]
