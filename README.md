@@ -303,3 +303,23 @@ No acknowledged write was lost, and every recovery brought all 3 nodes back.
   and `export_cursor/export_cursor_{0,1}` under voltdbroot. A power loss
   during or just after a restart could tear these, and the next recovery
   reads them. The statfs patch puts them on LazyFS too.
+
+With all of voltdbroot on LazyFS (statfs patch) and the fsync of everything
+outside the command log and snapshots at each power loss, build #9, same
+settings:
+
+| Workload | Power losses | Recovery (s) | Result |
+|---|---|---|---|
+| single (k=0) | 10 | 16.6 | PASS |
+| set | 13 | 16.6 | PASS |
+| rw-register | 9 | 16.6-26.6 | PASS |
+| list-append | 8 | 16.6-21.6 | PASS |
+| bank | 8 | 16.6 | PASS |
+| redundant-register | 9 | 16.6-21.6 | PASS |
+| single | 12 | 16.6 | PASS |
+
+No acknowledged write was lost, and every recovery brought all 3 nodes back.
+As before, the command log tracker was dropped at every power loss on two or
+three nodes, and part of `command_log/segments/loaned.1` on one node twice
+(list-append, single). Without the fsync, builds #6 and #8 never recovered
+from the first power loss (ENG-30442, ENG-30444, ENG-30445).
