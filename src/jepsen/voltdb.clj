@@ -303,7 +303,8 @@
 
 (defn kill-hard!
   "SIGKILLs VoltDB on this node and waits until it has exited, so no write of
-  its can land after this returns."
+  its can land after this returns. Returns the test's relative time in
+  nanoseconds once it had exited."
   [node]
   (c/su
     (c/exec :bash :-c "pkill -KILL -f '[p]lacementgroup' || true")
@@ -314,17 +315,19 @@
                   (throw+ {:type ::still-running, :node node})))
               {:retry-interval 200
                :timeout        30000
-               :log-message    "Waiting for VoltDB to exit"})))
+               :log-message    "Waiting for VoltDB to exit"}))
+  (util/relative-time-nanos))
 
 (defn power-off!
   "Power loss on this node, for --lazyfs: SIGKILLs VoltDB, waits until it has
   exited, then drops every write LazyFS holds that was not fsynced. Outside
   the command log and snapshots, unsynced writes are fsynced first unless
-  --lose-unsynced-config (ENG-30442)."
+  --lose-unsynced-config (ENG-30442). Returns kill-hard!'s time."
   [test node]
   (info "Power loss on" node)
-  (kill-hard! node)
-  (lazyfs/lose-unfsynced-writes! base-dir (:lose-unsynced-config test)))
+  (let [killed-at (kill-hard! node)]
+    (lazyfs/lose-unfsynced-writes! base-dir (:lose-unsynced-config test))
+    killed-at))
 
 (def torn-write-timeout-ms
   "How long torn-power-off! waits for VoltDB's next command log write."
@@ -337,13 +340,14 @@
   after which LazyFS kills itself, dropping every other unsynced write. Then
   kills VoltDB and remounts LazyFS over what was persisted. If no write comes
   within torn-write-timeout-ms, drops unsynced writes as power-off! does.
-  Returns what happened, for the op value."
+  Returns what happened, for the op value, with kill-hard!'s :killed-at."
   [test node]
   (let [segment (lazyfs/active-segment base-dir)
         persist [(inc (rand-int 2))]]
     (if-not segment
-      (do (power-off! test node)
-          {:torn? false, :reason :no-segment})
+      {:torn?     false
+       :reason    :no-segment
+       :killed-at (power-off! test node)}
       (do (when-not (:lose-unsynced-config test)
             (lazyfs/sync-config! base-dir))
           (lazyfs/tear-next-write! base-dir segment 2 persist)
@@ -356,12 +360,14 @@
                            true
                            (catch Exception _ false))]
             (info "Power loss on" node (if torn? "with a torn write to" "without a write to") segment)
-            (kill-hard! node)
-            ; Without a write the fault is still armed; a fresh mount drops it
-            (when-not torn?
-              (lazyfs/lose-unfsynced-writes! base-dir (:lose-unsynced-config test)))
-            (lazyfs/remount! base-dir)
-            {:torn? torn?, :segment segment, :persist persist})))))
+            (let [killed-at (kill-hard! node)]
+              ; Without a write the fault is still armed; a fresh mount
+              ; drops it
+              (when-not torn?
+                (lazyfs/lose-unfsynced-writes! base-dir (:lose-unsynced-config test)))
+              (lazyfs/remount! base-dir)
+              {:torn? torn?, :segment segment, :persist persist
+               :killed-at killed-at}))))))
 
 (defn sql-cmd!
   "Takes an SQL query and runs it on the local node via sqlcmd"

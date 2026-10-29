@@ -57,9 +57,9 @@
 
 (def async-slack-ms
   "Added to --commandlog-frequency when judging a lost write: covers the
-  command log fsync itself and the time between VoltDB dying and the
-  nemesis recording :killed-at."
-  1000)
+  command log fsync itself, and the time between VoltDB dying and the
+  nemesis seeing it gone (it polls every 200 ms)."
+  500)
 
 (defn async-checker
   "For --commandlog-async, where VoltDB acknowledges an insert before fsyncing

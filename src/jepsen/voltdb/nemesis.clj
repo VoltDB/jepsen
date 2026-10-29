@@ -248,7 +248,8 @@
 
   Responds to {:f :power-loss}. The op value is cluster-restart's, plus
   :killed-at, the test's relative time in nanoseconds once VoltDB was dead on
-  every node, which the async command log checker measures losses against."
+  every node (the latest node's), which the async command log checker
+  measures losses against."
   [opts]
   (reify n/Nemesis
     (setup! [this test] this)
@@ -256,8 +257,7 @@
     (invoke! [this test op]
       (assert (= :power-loss (:f op)))
       (let [start-ns (System/nanoTime)]
-        (c/on-nodes test voltdb/power-off!)
-        (let [killed-at (util/relative-time-nanos)]
+        (let [killed-at (reduce max (vals (c/on-nodes test voltdb/power-off!)))]
           (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
           (assoc op :value (assoc (start-all-and-await! test opts start-ns)
                                   :killed-at killed-at)))))
@@ -297,7 +297,7 @@
       (assert (= :torn-power-loss (:f op)))
       (let [start-ns  (System/nanoTime)
             torn      (c/on-nodes test voltdb/torn-power-off!)
-            killed-at (util/relative-time-nanos)]
+            killed-at (reduce max (map :killed-at (vals torn)))]
         (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
         (assoc op :value (assoc (start-all-and-await! test opts start-ns)
                                 :torn torn
@@ -353,8 +353,7 @@
                            (str "save failed: " (.getMessage e))))
               _        (Thread/sleep delay-ms)
               start-ns (System/nanoTime)]
-          (c/on-nodes test voltdb/power-off!)
-          (let [killed-at (util/relative-time-nanos)
+          (let [killed-at (reduce max (vals (c/on-nodes test voltdb/power-off!)))
                 _         (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
                 v         (start-all-and-await! test opts start-ns)]
             (assoc op :value (assoc v
