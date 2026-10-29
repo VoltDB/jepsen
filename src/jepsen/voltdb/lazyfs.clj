@@ -188,6 +188,50 @@
     (report! base-dir)
     (lazyfs/lose-unfsynced-writes! m)))
 
+(defn running?
+  "Is this node's LazyFS process alive? A torn-op fault kills it."
+  [base-dir]
+  (let [{:keys [config-file]} (lazyfs-map base-dir)]
+    (= "running"
+       (c/exec :bash :-c
+               (str "pgrep -f '[l]azyfs.*" config-file "' >/dev/null"
+                    " && echo running || echo gone")))))
+
+(defn remount!
+  "Mounts LazyFS again at (mount-dir base-dir) over its existing backing
+  directory, after LazyFS has died: what was persisted survives, as a disk's
+  contents survive a power loss. Detaches the dead mount first. VoltDB must
+  not be running."
+  [base-dir]
+  (c/su
+    (info "Remounting LazyFS at" (mount-dir base-dir))
+    (meh (c/exec :fusermount :-uz (mount-dir base-dir))))
+  (mount! base-dir))
+
+(defn active-segment
+  "The command log segment VoltDB wrote last, relative to voltdbroot, or nil
+  when there is none."
+  [base-dir]
+  (let [dir (str (mount-dir base-dir) "/command_log/segments")
+        f   (c/exec :bash :-c
+                    (str "ls -t " dir " 2>/dev/null | head -1"))]
+    (when-not (str/blank? f)
+      (str "command_log/segments/" f))))
+
+(defn tear-next-write!
+  "Arms a LazyFS torn-op fault on the file at path (relative to voltdbroot):
+  the next write to it is split into parts equal parts, only the parts listed
+  in persist (1-based) reach the backing directory, and LazyFS then kills
+  itself, dropping every other unsynced write, as a power loss in the middle
+  of that write would. LazyFS keys faults by backing path."
+  [base-dir path parts persist]
+  (let [m    (lazyfs-map base-dir)
+        file (str (:data-dir m) "/" path)]
+    (info "Tearing the next write to" file "into" parts "parts, persisting" persist)
+    (lazyfs/fifo! m (str "lazyfs::torn-op::file=" file
+                         "::parts=" parts
+                         "::persist=" (str/join "," persist)))))
+
 (defn log-config-file
   "VoltDB's server log config for --lazyfs runs, outside the mount."
   [base-dir]
