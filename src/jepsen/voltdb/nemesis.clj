@@ -245,22 +245,17 @@
   recovers the cluster as cluster-restart does. With a synchronous command
   log, every acknowledged write was fsynced first, so none may be lost.
 
-  Responds to {:f :power-loss}. The op value is cluster-restart's, plus
-  :voltdbroot-writes: per node, the files VoltDB modified under voltdbroot
-  (not on LazyFS, so not lost here) since the last power loss."
+  Responds to {:f :power-loss}. The op value is cluster-restart's."
   [opts]
   (reify n/Nemesis
     (setup! [this test] this)
 
     (invoke! [this test op]
       (assert (= :power-loss (:f op)))
-      (let [start-ns (System/nanoTime)
-            writes   (c/on-nodes test voltdb/power-off!)]
+      (let [start-ns (System/nanoTime)]
+        (c/on-nodes test voltdb/power-off!)
         (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
-        (assoc op :value (assoc (start-all-and-await! test opts start-ns)
-                                :voltdbroot-writes
-                                (into (sorted-map)
-                                      (filter (comp seq val) writes))))))
+        (assoc op :value (start-all-and-await! test opts start-ns))))
 
     (teardown! [this test])
 

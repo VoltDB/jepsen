@@ -136,8 +136,9 @@ a fault runs.
 
 ## LazyFS
 
-`--lazyfs` puts each node's command log, command log snapshots and snapshots on
-[LazyFS](https://github.com/dsrhaslab/lazyfs) 0.3.1 (commit `045a0b3`), a FUSE
+`--lazyfs` puts each node's voltdbroot, and so its command log, snapshots,
+config and catalog, on [LazyFS](https://github.com/dsrhaslab/lazyfs) 0.3.1
+(commit `045a0b3`, plus our `resources/lazyfs/statfs.patch`), a FUSE
 filesystem that holds written data in its own cache until it is fsynced.
 Dropping that cache after killing VoltDB loses what a power loss would. On
 its own, `--lazyfs` changes no fault: a killed node keeps its unsynced writes
@@ -151,24 +152,30 @@ lein run test -w set --nemesis power-loss --node-count 3 --kfactor 1 ...
 What it does on each node, in `src/jepsen/voltdb/lazyfs.clj`:
 
 - **Installs.** Installs `g++ cmake libfuse3-dev fuse3 git` with apt, then
-  builds LazyFS in `/opt/jepsen-lazyfs/<hostname>/<commit>`, once per node
-  (about 2 minutes); later runs reuse it. It creates `/dev/fuse` if missing.
+  builds LazyFS with our patches applied in
+  `/opt/jepsen-lazyfs/<hostname>/<commit>+statfs`, once per node (about 2
+  minutes); later runs reuse it. It creates `/dev/fuse` if missing.
   It needs root, apt and GitHub access on the nodes.
-- **Mounts.** Mounts LazyFS at `/tmp/jepsen-voltdb/lazyfs`, backed by
-  `/tmp/jepsen-voltdb/lazyfs.lazyfs/data`. The deployment's `<paths>` put
-  `command_log`, `command_log_snapshot` and `snapshots` there, and
-  `--file-corruption-dirs` follows them.
-- **Logs.** Saves `lazyfs.lazyfs/log` with the other logs. It ends with
+- **Mounts.** Mounts LazyFS at `/tmp/jepsen-voltdb/voltdbroot`, backed by
+  `/tmp/jepsen-voltdb/voltdbroot.lazyfs/data`, before `voltdb init` fills it.
+- **Moves VoltDB's log off the mount.** `volt.log` would otherwise be in
+  `voltdbroot/log`, where a power loss drops whatever log4j had not fsynced.
+  `bin/voltdb` runs with `LOG4J_VOLTSERVER_PATH` set to a copy of the kit's
+  `log4j2/voltserver.properties` whose log directory is
+  `/tmp/jepsen-voltdb/log`.
+- **Logs.** Saves `voltdbroot.lazyfs/log` with the other logs. It ends with
   LazyFS's cache usage and the files that held unsynced data at the end of
   the test.
 
 ### Things worth knowing
 
-- **voltdbroot is not on LazyFS.** LazyFS has no `statfs`, so it reports 0
-  bytes free, and VoltDB refuses to start with under 1 MB free in voltdbroot
-  (`FsUtils.ensureMinimalFreeSpace`). voltdbroot's `config/` and markers
-  are written once by `voltdb init`, before any fault, so recovery depends on
-  nothing written there during the test.
+- **The statfs patch.** Upstream LazyFS does not implement `statfs`, so its
+  mount reports 0 bytes free, and VoltDB refuses to start with under 1 MB
+  free in voltdbroot (`FsUtils.ensureMinimalFreeSpace`). The patch adds an
+  `lfs_statfs` that reports the backing directory's filesystem, as other
+  passthrough FUSE filesystems do. It changes no read or write path. Before
+  it, only the command log and snapshot directories could go on LazyFS, which
+  left out files every restart rewrites (see the power loss results).
 - **Eviction is on.** We use our own LazyFS config rather than Jepsen's. With
   eviction off, LazyFS never frees a page (an fsync only marks it clean), and
   once the 0.5 GB cache is full it writes straight through, so nothing written
@@ -248,10 +255,7 @@ about every `--nemesis-interval` seconds:
 With a synchronous command log, VoltDB fsyncs a transaction before it
 acknowledges it, so no acknowledged write may be lost; the workload checkers
 verify that. The op's value records `:recovered-in-ms`, or `:still-down`
-nodes, which fail the test, and `:voltdbroot-writes`: per node, the files
-VoltDB modified under voltdbroot since the last power loss. voltdbroot is not
-on LazyFS, so those writes survive here although a real power loss could lose
-them.
+nodes, which fail the test.
 
 `--node-count N` runs on the first N of the nodes given with `-n`, e.g. a
 3-node cluster from the lab's 5-node pool. It is applied before
@@ -279,10 +283,10 @@ No acknowledged write was lost, and every recovery brought all 3 nodes back.
   which only `voltdb recover --safemode` reads. Once, 4 KB of a command log
   segment (`command_log/segments/loaned.1`) on one node was dropped. That
   cell (bank) still passed.
-- **What recovery writes outside LazyFS.** Every restart rewrites
+- **What recovery wrote outside LazyFS.** These runs had only the command
+  log and snapshot directories on LazyFS. Every restart rewrote
   `config/cluster.properties`, `config/config.json`,
   `config/deployment.yaml`, `config/path.properties`, `config/catalog.jar`
   and `export_cursor/export_cursor_{0,1}` under voltdbroot. A power loss
   during or just after a restart could tear these, and the next recovery
-  reads them. This test cannot cover that until voltdbroot itself is on
-  LazyFS, which needs LazyFS to answer `statfs` (see above).
+  reads them. The statfs patch puts them on LazyFS too.
