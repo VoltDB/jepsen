@@ -108,6 +108,21 @@
                   (c/cd "lazyfs" (c/exec "./build.sh")))))
       dir)))
 
+(defn history-file
+  "Earlier mounts' LazyFS logs, appended at each mount."
+  [m]
+  (str (:lazyfs-dir m) "/log-history"))
+
+(defn stdout-file
+  "LazyFS's stdout and stderr, across mounts."
+  [m]
+  (str (:lazyfs-dir m) "/stdout"))
+
+(defn exits-file
+  "When and how each LazyFS process exited."
+  [m]
+  (str (:lazyfs-dir m) "/exits"))
+
 (defn mount!
   "Installs LazyFS and mounts it at (mount-dir base-dir), empty. Call after
   the kit is unpacked, which replaces base-dir, and before voltdb init, which
@@ -118,12 +133,22 @@
     (c/su
       (info "Mounting LazyFS at" dir)
       (c/exec :mkdir :-p dir data-dir)
+      ; LazyFS truncates its log when it starts; keep earlier mounts' logs
+      (c/exec :bash :-c (str "cat " log-file " >> " (history-file m)
+                             " 2>/dev/null; true"))
       (c/exec :touch log-file)
       (cu/write-file! (config m) config-file)
-      ; The mount script must run from the lazyfs directory
+      ; What scripts/mount-lazyfs.sh runs, but in the foreground under a
+      ; shell that records how LazyFS exited: 137 is its own SIGKILL after
+      ; a torn write; anything else means it crashed or was killed.
       (c/cd (str install "/lazyfs")
-            (c/exec "scripts/mount-lazyfs.sh"
-                    :-c config-file :-m dir :-r data-dir))
+            (c/exec :bash :-c
+                    (str "nohup bash -c './build/lazyfs " dir
+                         " --config-path " config-file
+                         " -o allow_other -o modules=subdir -o subdir=" data-dir
+                         " -f >> " (stdout-file m) " 2>&1; rc=$?;"
+                         " echo \"$(date -u +%FT%T.%3N) LazyFS exited with $rc\" >> "
+                         (exits-file m) "' >/dev/null 2>&1 &")))
       (await-fn (fn check-mounted []
                   (or (re-find #"lazyfs" (c/exec :findmnt dir))
                       (throw+ {:type ::not-mounted, :dir dir})))
@@ -163,17 +188,22 @@
   LazyFS never does, so we stand in for that writeback just before dropping
   the cache. Call after VoltDB is killed."
   [base-dir]
-  (let [root (mount-dir base-dir)]
+  (let [root (mount-dir base-dir)
+        find (str "find " root " -type d \\( "
+                  (->> durable-dirs
+                       (map #(str "-path " root "/" %))
+                       (str/join " -o "))
+                  " \\) -prune -o -type f ! -name '.fuse_hidden*'"
+                  " -exec sync {} + 2>&1")]
     (c/su
       (info "fsyncing voltdbroot outside" (str/join ", " durable-dirs))
-      (c/exec :find root
-              :-type :d (c/lit "\\(")
-              (->> durable-dirs
-                   (map #(str "-path " root "/" %))
-                   (str/join " -o ")
-                   c/lit)
-              (c/lit "\\)") :-prune
-              :-o :-type :f :-exec :sync (c/lit "{} +")))))
+      ; Files can vanish between find and sync, e.g. FUSE's .fuse_hidden
+      ; files for deleted-while-open files once VoltDB's handles close.
+      ; Only other errors fail.
+      (c/exec :bash :-c
+              (str "out=$(" find "); rc=$?; "
+                   "if [ $rc -ne 0 ] && echo \"$out\" | grep -v 'No such file or directory' | grep -q .; "
+                   "then echo \"$out\" >&2; exit $rc; fi")))))
 
 (defn lose-unfsynced-writes!
   "Drops every write LazyFS holds that was not fsynced, as a power loss
@@ -187,6 +217,50 @@
       (sync-config! base-dir))
     (report! base-dir)
     (lazyfs/lose-unfsynced-writes! m)))
+
+(defn running?
+  "Is this node's LazyFS process alive? A torn-op fault kills it."
+  [base-dir]
+  (let [{:keys [config-file]} (lazyfs-map base-dir)]
+    (= "running"
+       (c/exec :bash :-c
+               (str "pgrep -f '^[.]/build/lazyfs .*" config-file "' >/dev/null"
+                    " && echo running || echo gone")))))
+
+(defn remount!
+  "Mounts LazyFS again at (mount-dir base-dir) over its existing backing
+  directory, after LazyFS has died: what was persisted survives, as a disk's
+  contents survive a power loss. Detaches the dead mount first. VoltDB must
+  not be running."
+  [base-dir]
+  (c/su
+    (info "Remounting LazyFS at" (mount-dir base-dir))
+    (meh (c/exec :fusermount :-uz (mount-dir base-dir))))
+  (mount! base-dir))
+
+(defn active-segment
+  "The command log segment VoltDB wrote last, relative to voltdbroot, or nil
+  when there is none."
+  [base-dir]
+  (let [dir (str (mount-dir base-dir) "/command_log/segments")
+        f   (c/exec :bash :-c
+                    (str "ls -t " dir " 2>/dev/null | head -1"))]
+    (when-not (str/blank? f)
+      (str "command_log/segments/" f))))
+
+(defn tear-next-write!
+  "Arms a LazyFS torn-op fault on the file at path (relative to voltdbroot):
+  the next write to it is split into parts equal parts, only the parts listed
+  in persist (1-based) reach the backing directory, and LazyFS then kills
+  itself, dropping every other unsynced write, as a power loss in the middle
+  of that write would. LazyFS keys faults by backing path."
+  [base-dir path parts persist]
+  (let [m    (lazyfs-map base-dir)
+        file (str (:data-dir m) "/" path)]
+    (info "Tearing the next write to" file "into" parts "parts, persisting" persist)
+    (lazyfs/fifo! m (str "lazyfs::torn-op::file=" file
+                         "::parts=" parts
+                         "::persist=" (str/join "," persist)))))
 
 (defn log-config-file
   "VoltDB's server log config for --lazyfs runs, outside the mount."
@@ -208,8 +282,10 @@
   :LOG4J_VOLTSERVER_PATH)
 
 (defn log-files
-  "LazyFS's own log, for the test's log files. Reports cache usage into it
-  first."
+  "LazyFS's own logs, for the test's log files: this mount's log, earlier
+  mounts' logs, stdout and stderr, and how each LazyFS process exited.
+  Reports cache usage into the log first."
   [base-dir]
   (report! base-dir)
-  [(:log-file (lazyfs-map base-dir))])
+  (let [m (lazyfs-map base-dir)]
+    [(:log-file m) (history-file m) (stdout-file m) (exits-file m)]))

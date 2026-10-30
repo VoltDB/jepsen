@@ -52,7 +52,12 @@
   "All nemesis faults we know about."
   #{:partition :packet :clock :pause :kill :rando :cluster-restart
     :file-corruption :membership :snapshot-io-error :client-response-delay
-    :promotion-delay :rejoin-kill :replay-delay :replay-error :power-loss})
+    :promotion-delay :rejoin-kill :replay-delay :replay-error :power-loss
+    :torn-power-loss :snapshot-power-loss :node-power-loss})
+
+(def lazyfs-nemeses
+  "Faults that need --lazyfs, which they turn on."
+  #{:power-loss :torn-power-loss :snapshot-power-loss :node-power-loss})
 
 (def corruptible-dirs
   "Directories under the voltdbroot whose files the file-corruption nemesis
@@ -175,9 +180,21 @@
 
    [nil "--byteman" "Attach the Byteman agent (listener on localhost:9091) to every VoltDB server JVM, so rules from resources/byteman can be loaded mid-test. Off by default; with no rules loaded it should not change behaviour."]
 
-   [nil "--lazyfs" "Put voltdbroot (command log, snapshots, config) on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root. --nemesis power-loss turns this on."]
+   [nil "--lazyfs" "Put voltdbroot (command log, snapshots, config) on LazyFS, which loses writes that were not fsynced when its cache is dropped. Builds LazyFS on each node; needs /dev/fuse and root. The power-loss faults (power-loss, torn-power-loss, snapshot-power-loss, node-power-loss) turn this on."]
 
    [nil "--lose-unsynced-config" "With --lazyfs, a power loss also drops unsynced writes outside the command log and snapshots (config, catalog, .initialized, export cursors). Off by default: VoltDB never fsyncs those (ENG-30442), so turning this on mostly re-finds that bug."]
+
+   [nil "--commandlog-async" "Asynchronous command log: VoltDB acknowledges a transaction before fsyncing it, and fsyncs every --commandlog-frequency ms. Power loss may then lose writes acknowledged within that window; the set workload checks exactly that, and only the set workload supports this."]
+
+   [nil "--commandlog-frequency MS" "With --commandlog-async, how often VoltDB fsyncs the command log, in milliseconds."
+    :default 200
+    :parse-fn parse-long
+    :validate [pos? "Must be positive"]]
+
+   [nil "--snapshot-power-loss-delay MS" "The snapshot-power-loss fault cuts power a random 0 to MS milliseconds after starting a snapshot."
+    :default 500
+    :parse-fn parse-long
+    :validate [#(not (neg? %)) "Must not be negative"]]
 
    [nil "--node-count NUMBER" "Run on only the first NUMBER of the given nodes, e.g. a 3-node cluster from a 5-node pool."
     :parse-fn parse-long
@@ -370,8 +387,11 @@
         opts          (cond-> opts
                         (seq byteman-on) (assoc :byteman true)
                         ; Power loss drops LazyFS's unsynced writes
-                        ((set (:nemesis opts)) :power-loss) (assoc :lazyfs true))
+                        (some (set (:nemesis opts)) lazyfs-nemeses) (assoc :lazyfs true))
         workload-name (:workload opts)
+        _             (when (and (:commandlog-async opts) (not= :set workload-name))
+                        (throw (IllegalArgumentException.
+                                 "--commandlog-async is only checked by the set workload")))
         ; Right now workloads construct entire test maps. We'll refactor this
         ; in the next commit.
         workload ((workloads workload-name) opts)
@@ -400,6 +420,7 @@
                    :kfactor   (:kfactor opts)
                    :cluster-restart-down-time (:cluster-restart-down-time opts)
                    :await-up-timeout (:await-up-timeout opts)
+                   :snapshot-power-loss-delay (:snapshot-power-loss-delay opts)
                    :interval  (:nemesis-interval opts)})
         gen (->> (:generator workload)
                  (gen/stagger (/ (:rate opts)))

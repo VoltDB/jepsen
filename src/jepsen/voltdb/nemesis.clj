@@ -149,7 +149,7 @@
 
 (defn recovery-checker
   "Fails the test when a recovery step left nodes down: any :await-up,
-  :cluster-restart or :power-loss op whose value carries :still-down. Data checks can pass
+  :cluster-restart or power-loss op whose value carries :still-down. Data checks can pass
   on the surviving nodes, so without this a green result would not establish
   that the cluster recovered. Kept separate from the workload checker so the
   two outcomes stay distinguishable."
@@ -158,7 +158,8 @@
     (check [this test history opts]
       (let [stuck (->> history
                        (filter #(and (= :nemesis (:process %))
-                                     (#{:await-up :cluster-restart :power-loss} (:f %))
+                                     (#{:await-up :cluster-restart :power-loss :torn-power-loss
+                                        :snapshot-power-loss :node-power-loss} (:f %))
                                      (map? (:value %))
                                      (:still-down (:value %))))
                        (map (fn [op] {:f (:f op)
@@ -245,7 +246,10 @@
   recovers the cluster as cluster-restart does. With a synchronous command
   log, every acknowledged write was fsynced first, so none may be lost.
 
-  Responds to {:f :power-loss}. The op value is cluster-restart's."
+  Responds to {:f :power-loss}. The op value is cluster-restart's, plus
+  :killed-at, the test's relative time in nanoseconds once VoltDB was dead on
+  every node (the latest node's), which the async command log checker
+  measures losses against."
   [opts]
   (reify n/Nemesis
     (setup! [this test] this)
@@ -253,9 +257,10 @@
     (invoke! [this test op]
       (assert (= :power-loss (:f op)))
       (let [start-ns (System/nanoTime)]
-        (c/on-nodes test voltdb/power-off!)
-        (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
-        (assoc op :value (start-all-and-await! test opts start-ns))))
+        (let [killed-at (reduce max (vals (c/on-nodes test voltdb/power-off!)))]
+          (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
+          (assoc op :value (assoc (start-all-and-await! test opts start-ns)
+                                  :killed-at killed-at)))))
 
     (teardown! [this test])
 
@@ -272,6 +277,157 @@
      :perf      #{{:name  "power-loss"
                    :fs    #{:power-loss}
                    :color "#C0392B"}}}))
+
+(defn torn-power-loss-nemesis
+  "Power loss on every node at once in the middle of a command log write, for
+  --lazyfs: each node's next write to its active command log segment is torn
+  in two, one half reaches the disk, and every other unsynced write is lost
+  (see voltdb/torn-power-off!). Then recovers the cluster as power-loss does.
+  The torn write was never fsynced, so its transaction was never
+  acknowledged: recovery must stop at the last whole record and lose nothing
+  acknowledged.
+
+  Responds to {:f :torn-power-loss}. The op value is cluster-restart's, plus
+  :torn, each node's torn-power-off! result, and :killed-at as power-loss."
+  [opts]
+  (reify n/Nemesis
+    (setup! [this test] this)
+
+    (invoke! [this test op]
+      (assert (= :torn-power-loss (:f op)))
+      (let [start-ns  (System/nanoTime)
+            torn      (c/on-nodes test voltdb/torn-power-off!)
+            killed-at (reduce max (map :killed-at (vals torn)))]
+        (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
+        (assoc op :value (assoc (start-all-and-await! test opts start-ns)
+                                :torn torn
+                                :killed-at killed-at))))
+
+    (teardown! [this test])
+
+    n/Reflection
+    (fs [_] #{:torn-power-loss})))
+
+(defn restored-snapshot
+  "The nonce of the snapshot this node's running VoltDB restored from, per
+  volt.log, or nil when it restored none. The log spans restarts, so only
+  lines after the last process start count."
+  []
+  (let [line (c/exec :awk "/PID of this process/ {r = \"\"} /Restoring from path:/ {r = $0} END {print r}"
+                     (str voltdb/base-dir "/log/volt.log"))]
+    (second (re-find #"with nonce: (\S+)" line))))
+
+(defn snapshot-power-loss-nemesis
+  "Power loss on every node at once while a snapshot is being written, for
+  --lazyfs: starts a non-blocking @SnapshotSave into voltdbroot/snapshots,
+  where recovery looks for snapshots, waits a random time up to
+  --snapshot-power-loss-delay ms, then cuts power and recovers as power-loss
+  does. Recovery prefers the newest snapshot, so it must find the
+  interrupted one incomplete and use an older one; loading it partially
+  would lose acknowledged writes, which the workload checkers catch.
+
+  Responds to {:f :snapshot-power-loss}. The op value is cluster-restart's,
+  plus the snapshot's :nonce, :delay-ms, the save's :save-status, and
+  :restored, the snapshot each node restored from (the nonce when the
+  snapshot was complete in time), and :killed-at as power-loss."
+  [opts]
+  (let [n (atom 0)]
+    (reify n/Nemesis
+      (setup! [this test] this)
+
+      (invoke! [this test op]
+        (assert (= :snapshot-power-loss (:f op)))
+        (let [nonce    (str "jepsen_power_loss_" (swap! n inc))
+              delay-ms (rand-int (inc (:snapshot-power-loss-delay opts 500)))
+              node     (rand-nth (:nodes test))
+              status   (try
+                         (let [conn (vc/connect node {})]
+                           (try
+                             (.getStatus (.callProcedure
+                                           conn "@SnapshotSave"
+                                           (into-array Object
+                                                       [(str voltdb/base-dir "/voltdbroot/snapshots")
+                                                        nonce (int 0)])))
+                             (finally (vc/close! conn))))
+                         (catch Exception e
+                           (str "save failed: " (.getMessage e))))
+              _        (Thread/sleep delay-ms)
+              start-ns (System/nanoTime)]
+          (let [killed-at (reduce max (vals (c/on-nodes test voltdb/power-off!)))
+                _         (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
+                v         (start-all-and-await! test opts start-ns)]
+            (assoc op :value (assoc v
+                                    :killed-at   killed-at
+                                    :nonce       nonce
+                                    :delay-ms    delay-ms
+                                    :save-status status
+                                    :restored    (c/on-nodes
+                                                   test (fn [_ _] (restored-snapshot))))))))
+
+      (teardown! [this test])
+
+      n/Reflection
+      (fs [_] #{:snapshot-power-loss}))))
+
+(defn rejoins-completed
+  "How many rejoins this node's volt.log reports as completed."
+  []
+  (parse-long
+    (c/exec :bash :-c (str "grep -c 'Node rejoin completed' " voltdb/base-dir
+                           "/log/volt.log || true"))))
+
+(defn node-power-loss-nemesis
+  "Power loss on one node, chosen at random, for --lazyfs: kills VoltDB there
+  and drops its unsynced writes, while the rest of the cluster keeps serving
+  (needs --kfactor 1 or more), then starts it again, which rejoins it to the
+  live cluster, and waits until volt.log reports the rejoin complete.
+
+  Responds to {:f :node-power-loss}. The op value is the :node, and
+  :rejoined-in-ms, or :still-down when the rejoin did not complete within
+  --await-up-timeout."
+  [opts]
+  (reify n/Nemesis
+    (setup! [this test] this)
+
+    (invoke! [this test op]
+      (assert (= :node-power-loss (:f op)))
+      (let [node    (rand-nth (:nodes test))
+            timeout (* 1000 (:await-up-timeout opts 600))
+            rejoin! (fn [test node]
+                      (let [before (rejoins-completed)]
+                        (voltdb/power-off! test node)
+                        (Thread/sleep (* 1000 (:cluster-restart-down-time opts 5)))
+                        (let [start-ns (System/nanoTime)]
+                          (db/start! (:db test) test node)
+                          (try (util/await-fn
+                                 (fn rejoined? []
+                                   (when-not (< before (rejoins-completed))
+                                     (throw+ {:type ::not-rejoined})))
+                                 {:retry-interval 1000
+                                  :log-interval   30000
+                                  :log-message    (str "Waiting for " node " to rejoin")
+                                  :timeout        timeout})
+                               {:node           node
+                                :rejoined-in-ms (long (/ (- (System/nanoTime) start-ns)
+                                                         1000000))}
+                               (catch Exception _
+                                 (warn node "did not rejoin")
+                                 {:node node, :still-down #{node}})))))]
+        (assoc op :value (get (c/on-nodes test [node] rejoin!) node))))
+
+    (teardown! [this test])
+
+    n/Reflection
+    (fs [_] #{:node-power-loss})))
+
+(defn lazyfs-package
+  "Package for a LazyFS power-loss fault f, built by (nemesis-fn opts)."
+  [opts f nemesis-fn color]
+  (when ((:faults opts) f)
+    {:nemesis   (nemesis-fn opts)
+     :generator (->> (repeat {:type :info, :f f})
+                     (gen/stagger (:interval opts)))
+     :perf      #{{:name (name f), :fs #{f}, :color color}}}))
 
 (defn preinstalled-bitflip
   "jepsen.nemesis/bitflip, minus its setup!, which install-archive!s the
@@ -309,6 +465,12 @@
         (concat [(rando-package opts)
                  (cluster-restart-package opts)
                  (power-loss-package opts)
+                 (lazyfs-package opts :torn-power-loss
+                                 torn-power-loss-nemesis "#8E44AD")
+                 (lazyfs-package opts :snapshot-power-loss
+                                 snapshot-power-loss-nemesis "#2471A3")
+                 (lazyfs-package opts :node-power-loss
+                                 node-power-loss-nemesis "#B9770E")
                  (byteman-faults/package opts)
                  (membership/package opts)
                  (await-up-package opts)])
