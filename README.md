@@ -352,7 +352,7 @@ How each one works:
   fsyncing it, so the set workload, the only one that supports
   `--commandlog-async`, uses its own checker instead of `set-full`: every
   acknowledged insert missing from the final read must have been
-  acknowledged no more than `--commandlog-frequency` ms plus 1 s of slack
+  acknowledged no more than `--commandlog-frequency` ms plus 500 ms of slack
   before the next power loss's `:killed-at` (when VoltDB was dead on every
   node). It also fails on elements no insert carried, or that a failed insert
   carried. The result reports `:lost-count` and `:max-lost-age-ms`.
@@ -373,3 +373,49 @@ How each one works:
   its transaction was never acknowledged.
 - **Single node.** `volt.log` must report one more "Node rejoin completed"
   within `--await-up-timeout`. The op value has `:rejoined-in-ms`.
+
+#### Results
+
+jenkins-st `matrix-systemtest-apprunner-jepsen` / `ENG-30396-lazyfs`: 3 nodes,
+k=1, synchronous command log unless noted, 300 s per run,
+`--nemesis-interval 30`.
+
+| Fault | Builds | Runs | Faults | Recovery (s) | Result |
+|---|---|---|---|---|---|
+| `torn-power-loss` | #10, #11 | 10 | 87 power losses, 78 with a torn write on all 3 nodes | 16.5-33 | 9 PASS, 1 FAIL (LazyFS died, below) |
+| `snapshot-power-loss` | #12 | 6 | 58 power losses during a snapshot | 16.6-21.7 | 6 PASS |
+| `node-power-loss` | #13, #14 | 8 | 86 single-node power losses | rejoin 4.4-5.5 | 8 PASS (+1 harness failure, fixed) |
+| `power-loss --commandlog-async --commandlog-frequency 200` (set, 600 s) | #16 | 2 | 33 power losses | 16.6-21.6 | 2 PASS |
+
+Runs used the set, rw-register, list-append, bank, redundant-register and
+single workloads. No acknowledged write was lost in any run.
+
+- **Torn tail.** Recovery never failed on a torn command log record: every
+  restart replayed up to the last whole record. When a power loss came right
+  after a recovery, clients had often not reconnected yet (`:no-conns`), so
+  nothing wrote within 10 s and the fault fell back to a plain power loss;
+  list-append's clients were the slowest to come back.
+  In build #10 (rw-register), one node's remounted LazyFS process died
+  13 s into recovery, without logging anything, while VoltDB was writing a
+  fault log entry to its command log ("Software caused connection abort",
+  the error FUSE gives requests in flight when its daemon dies). The node
+  could not start again, so the run failed on recovery; its data checks
+  passed. This is a LazyFS failure, not a VoltDB one, and it did not happen
+  again in 87 torn power losses. Since `6c90e24`, every LazyFS exit status is
+  recorded in `voltdbroot.lazyfs/exits`: 137 is LazyFS's own SIGKILL after a
+  torn write, and 134 is an abort when it is unmounted while running ("terminate
+  called without an active exception"), which is harmless.
+- **Snapshot write.** The interrupted snapshot was restored in 31 of the 58
+  power losses (it had finished in time, typically with delays over 200 ms)
+  and passed over for an older one in the other 27. None was loaded
+  partially.
+- **Asynchronous command log.** 161 of 44,433 acknowledged inserts were
+  lost, the oldest 252 ms before its power loss: the 200 ms fsync window plus
+  the fsync itself. Build #15 had failed this check only because
+  `:killed-at` was taken after the power-off step finished, about 1.3 s after
+  VoltDB died; fixed in `7fb3280`.
+- **Single node.** Build #13's redundant-register run failed in the harness:
+  the fsync before the power loss tripped over `config/.fuse_hidden*` files
+  that vanished as the killed VoltDB's handles closed, which left that node
+  down, and the next fault took the cluster below k-safety. Fixed in
+  `24dd582`; build #14 reran that workload and set.
