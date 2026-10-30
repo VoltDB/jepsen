@@ -445,8 +445,8 @@ about every 30 s:
 | `snapshot` | `snapshot-power-loss` | the six above |
 | `node` | `node-power-loss` | the six above |
 
-A cell takes its time limit plus 1.5-2 minutes of setup and teardown, so the
-full suite takes about 3 hours. Options:
+A cell takes its time limit plus about 1-3 minutes of setup and teardown, so the
+full suite takes about 2 h 40 min. Options:
 
 | Option | Default | What it does |
 |---|---|---|
@@ -512,8 +512,32 @@ exited (see "Torn tail" above). `command.txt` reruns the cell with the same
 seed. Report a VoltDB bug with the scenario, seed, fault sequence from the
 history, and the kit from `manifest.txt`.
 
-In the lab, `matrix-systemtest-apprunner-jepsen` runs the suite as the
-`lazyfs-suite` case (`CASE=lazyfs-suite NEMESIS=none CELLS=`), with
-`TIME_LIMIT` as the time limit, `TESTCOUNT` as `--runs`, and
-`JEPSEN_EXTRA_ARGS` as the suite's own options. The results directory is in
-the build's artifacts under `jepsen-volt/tmp/jepsen-lazyfs-suite/`.
+In the lab, `matrix-systemtest-apprunner-jepsen` on the `ENG-30396-lazyfs`
+branch runs the suite as the `lazyfs-suite` case (`CASE=lazyfs-suite
+NEMESIS=none CELLS=`), with `TIME_LIMIT` as the time limit, `TESTCOUNT` as
+`--runs`, and `JEPSEN_EXTRA_ARGS` as the suite's own options. That case is in
+pro's `run-jenkins-jepsen-test.sh` on that branch only, and the job takes
+pro's scripts from the kit, so a change there needs a new kit build. The
+results directory is in the build's artifacts under
+`jepsen-volt/tmp/jepsen-lazyfs-suite/`, and as a tarball in the failure
+bucket when a cell failed. A full run's results are about 860 MB, 95 MB
+compressed, mostly LazyFS's own logs.
+
+#### Results
+
+jenkins-st `matrix-systemtest-apprunner-jepsen` / `ENG-30396-lazyfs` build
+#18, the full suite with the defaults, kit `16.1.0-SNAPSHOT` (sha256
+`3dfb84ff...`), first seed 142521026: 25 cells in 2 h 38 min, 6.1-8.3 minutes
+each.
+
+| Scenario | Cells | Result |
+|---|---|---|
+| `power-loss` | 6 | 6 PASS |
+| `async` | 1 | PASS |
+| `torn` | 6 | 6 PASS: every checker passed. The run marked them FATAL, which led to the expected-FATAL rule above; reclassified from its own results with that rule, they pass, with 324 expected FATAL lines and no unexpected ones |
+| `snapshot` | 6 | 6 PASS |
+| `node` | 6 | 6 PASS |
+
+No cell outside `torn` had a FATAL line. Build #19 ran the `torn` cells again
+with the rule (`JEPSEN_EXTRA_ARGS=--scenarios torn`, first seed 407114891):
+6 PASS, with 36-78 expected FATAL lines per cell and no unexpected ones.
