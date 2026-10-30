@@ -419,3 +419,126 @@ single workloads. No acknowledged write was lost in any run.
   that vanished as the killed VoltDB's handles closed, which left that node
   down, and the next fault took the cluster below k-safety. Fixed in
   `24dd582`; build #14 reran that workload and set.
+
+### Running the suite
+
+`resources/lazyfs/run-suite.sh` runs the whole LazyFS suite: every scenario
+above against every workload that supports it, one `lein run test` per cell,
+one after another. It runs from the control node, like `lein run test`, and
+needs the same things: JDK 21 for lein, a VoltDB kit, a license, and at least
+three DB nodes with root, apt, GitHub access and FUSE (see "Installs" above).
+
+```
+resources/lazyfs/run-suite.sh --tarball file:///path/voltdb-ent-<version>.tar.gz \
+    -l license.xml -n node1 -n node2 -n node3 \
+    -- --username ubuntu --ssh-private-key /home/me/.ssh/id_rsa
+```
+
+The cells, 25 in all, each on 3 nodes with k=1, 300 s of load and a fault
+about every 30 s:
+
+| Scenario | Nemesis | Workloads |
+|---|---|---|
+| `power-loss` | `power-loss`, synchronous command log | set, rw-register, list-append, bank, redundant-register, single |
+| `async` | `power-loss --commandlog-async` | set |
+| `torn` | `torn-power-loss` | the six above |
+| `snapshot` | `snapshot-power-loss` | the six above |
+| `node` | `node-power-loss` | the six above |
+
+A cell takes its time limit plus about 1-3 minutes of setup and teardown, so the
+full suite takes about 2 h 40 min. Options:
+
+| Option | Default | What it does |
+|---|---|---|
+| `--scenarios LIST` | all five | Run only these scenarios, e.g. `torn,node` |
+| `--workloads LIST` | all six | Run only these workloads |
+| `--time-limit S` | 300 | Seconds of load per cell |
+| `--nemesis-interval S` | 30 | Mean seconds between faults |
+| `--node-count N`, `--kfactor K` | 3, 1 | Cluster size, from the first N nodes, and k-factor |
+| `--runs N` | 1 | Run every cell N times |
+| `--seed N` | random | Seed of the first cell; each later cell gets the next one |
+| `--results DIR` | `results/lazyfs-<UTC time>` | Where results go |
+| `--nodes-file FILE` | | Read the DB nodes from a file, one per line, instead of `-n` |
+| `--dry-run` | | Print every cell's `lein` command and stop |
+
+Everything after `--` goes to every `lein run test`. The script exits 0 when
+every cell passed, 1 when any did not, and 2 on bad usage. A failed cell does
+not stop the suite.
+
+#### Results directory
+
+```
+results/lazyfs-20261030T150000Z/
+  manifest.txt          what was tested: jepsen-volt commit, LazyFS version and
+                        patch checksum, VoltDB kit and its checksum, VoltDB build
+                        (from volt.log), JDKs, nodes, cluster, time limit, seed
+  summary.txt           one line per cell and the overall PASS or FAIL
+  summary.tsv           the same, tab-separated
+  01-power-loss-set/
+    command.txt         the exact lein command, seed included, to rerun the cell
+    result              PASS, FAIL, UNKNOWN, FATAL or ERROR
+    fatal.txt           every VoltDB FATAL, per node, marked expected or unexpected
+    jepsen.log          lein's output
+    stderr.log
+    store/              the cell's Jepsen store: results.edn, history.edn,
+                        jepsen.log, and per node volt.log, deployment.xml and
+                        voltdbroot.lazyfs/{log,exits}
+  02-power-loss-rw-register/
+  ...
+```
+
+A cell's result is:
+
+- **PASS**: every checker passed.
+- **FAIL**: a checker found a problem: lost or unexpected writes, an anomaly,
+  or a recovery that left nodes down (`:recovery` in `results.edn`).
+- **UNKNOWN**: a checker crashed (jepsen exits 2), so nothing was verified.
+- **FATAL**: a node's `volt.log` has an unexpected FATAL line, which the lab
+  job also counts as a failure, whatever the checkers said. In the torn
+  scenario two kinds are expected and listed but not counted: LazyFS kills
+  itself after the torn write, so VoltDB's next write to the dead mount fails
+  ("Software caused connection abort") and it dies with a FATAL; and the
+  nodes die seconds apart, so one left with fewer than half of its peers
+  shuts down with a partition detection FATAL. A real power loss kills every
+  process first, so it would cause neither.
+- **ERROR**: no results: setup or the harness failed. See `stderr.log`.
+
+To look into a failure, start with `store/results.edn` (which checker, which
+op) and the op values in `store/history.edn` (each fault records what it did:
+`:killed-at`, `:torn`, `:restored`, `:still-down`, `:rejoined-in-ms`). Each
+node's `voltdbroot.lazyfs/log` lists the files whose unsynced writes were
+dropped at each power loss, and `voltdbroot.lazyfs/exits` records how LazyFS
+exited (see "Torn tail" above). `command.txt` reruns the cell with the same
+seed. Report a VoltDB bug with the scenario, seed, fault sequence from the
+history, and the kit from `manifest.txt`.
+
+In the lab, `matrix-systemtest-apprunner-jepsen` on the `ENG-30396-lazyfs`
+branch runs the suite as the `lazyfs-suite` case (`CASE=lazyfs-suite
+NEMESIS=none CELLS=`), with `TIME_LIMIT` as the time limit, `TESTCOUNT` as
+`--runs`, and `JEPSEN_EXTRA_ARGS` as the suite's own options. That case is in
+pro's `run-jenkins-jepsen-test.sh` on that branch only, and the job takes
+pro's scripts from the kit, so a change there needs a new kit build. The
+results directory is in the build's artifacts under
+`jepsen-volt/tmp/jepsen-lazyfs-suite/`, and as a tarball in the failure
+bucket when a cell failed. A full run's results are about 860 MB, 95 MB
+compressed, mostly LazyFS's own logs.
+
+#### Results
+
+jenkins-st `matrix-systemtest-apprunner-jepsen` / `ENG-30396-lazyfs` build
+#18, the full suite with the defaults, kit `16.1.0-SNAPSHOT` (sha256
+`3dfb84ff...`), first seed 142521026: 25 cells in 2 h 38 min, 6.1-8.3 minutes
+each.
+
+| Scenario | Cells | Result |
+|---|---|---|
+| `power-loss` | 6 | 6 PASS |
+| `async` | 1 | PASS |
+| `torn` | 6 | 6 PASS: every checker passed. The run marked them FATAL, which led to the expected-FATAL rule above; reclassified from its own results with that rule, they pass, with 324 expected FATAL lines and no unexpected ones |
+| `snapshot` | 6 | 6 PASS |
+| `node` | 6 | 6 PASS |
+
+No cell outside `torn` had a FATAL line. Build #19 ran the `torn` cells again
+with the rule (`JEPSEN_EXTRA_ARGS=--scenarios torn`, first seed 407114891):
+6 PASS; the two cells checked (set, single) had 60 and 72 FATAL lines, all
+expected.
