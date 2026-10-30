@@ -234,15 +234,47 @@ esac
 } > "$MANIFEST"
 printf 'cell\tscenario\tworkload\trun\tseed\tresult\texit\tseconds\n' > "$SUMMARY_TSV"
 
+# Lists every VoltDB FATAL in a cell's store in fatal.txt, one per line as
+# "<node> <expected|unexpected> <log line>", and prints the number that were
+# unexpected. In the torn scenario LazyFS kills itself after the torn write,
+# so VoltDB's next write to the dead mount fails ("Software caused connection
+# abort" or "Transport endpoint is not connected") and it dies with a FATAL,
+# and the nodes die seconds apart, so a node left with fewer than half of its
+# peers shuts itself down with a partition detection FATAL. Neither would
+# happen in a real power loss, which kills every process first; any other
+# FATAL is unexpected.
+list_fatals() {
+    local scenario=$1 dir=$2 log node
+    : > "$dir/fatal.txt"
+    for log in "$dir"/store/*/log/volt.log; do
+        [ -f "$log" ] || continue
+        node=$(basename "$(dirname "$(dirname "$log")")")
+        awk -v node="$node" -v torn="$([ "$scenario" == torn ] && echo 1)" '
+            { line[NR] = $0 }
+            END {
+                for (i = 1; i <= NR; i++) {
+                    if (line[i] !~ /:[0-9]+,[0-9]+[[:space:]]+FATAL/) continue
+                    block = line[i] " " line[i+1] " " line[i+2] " " line[i+3]
+                    ok = torn &&
+                         (block ~ /Software caused connection abort|Transport endpoint is not connected/ ||
+                          line[i] ~ /Partition detection logic will stop this process|possible a network partition has split the cluster/)
+                    print node, (ok ? "expected" : "unexpected"), line[i]
+                }
+            }' "$log" >> "$dir/fatal.txt"
+    done
+    grep -c '^[^ ]* unexpected ' "$dir/fatal.txt"
+}
+
 # Classifies a finished cell from lein's exit status and its store:
 # PASS, FAIL (a checker found a problem), UNKNOWN (a checker crashed: jepsen
-# exits 2), FATAL (a VoltDB FATAL, which the lab job also counts as a
-# failure) or ERROR (no results: setup or the harness failed).
+# exits 2), FATAL (an unexpected VoltDB FATAL, see list_fatals, which the lab
+# job also counts as a failure) or ERROR (no results: setup or the harness
+# failed).
 classify() {
-    local status=$1 dir=$2
+    local scenario=$1 status=$2 dir=$3
     if [ ! -f "$dir/store/results.edn" ]; then
         echo ERROR
-    elif grep -qsE ':[0-9]+,[0-9]+[[:space:]]+FATAL' "$dir"/store/*/log/volt.log; then
+    elif [ "$(list_fatals "$scenario" "$dir")" -gt 0 ]; then
         echo FATAL
     else
         case $status in
@@ -284,7 +316,7 @@ for run in $(seq 1 "$RUNS"); do
         if [ -n "$after" ] && [ "$after" != "$before" ]; then
             cp -R "$(cd store && cd "$after" && pwd)" "$dir/store"
         fi
-        result=$(classify "$status" "$dir")
+        result=$(classify "$scenario" "$status" "$dir")
         echo "$result" > "$dir/result"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$scenario" "$workload" \
             "$run" "$seed" "$result" "$status" "$took" >> "$SUMMARY_TSV"

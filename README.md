@@ -477,6 +477,7 @@ results/lazyfs-20261030T150000Z/
   01-power-loss-set/
     command.txt         the exact lein command, seed included, to rerun the cell
     result              PASS, FAIL, UNKNOWN, FATAL or ERROR
+    fatal.txt           every VoltDB FATAL, per node, marked expected or unexpected
     jepsen.log          lein's output
     stderr.log
     store/              the cell's Jepsen store: results.edn, history.edn,
@@ -492,8 +493,14 @@ A cell's result is:
 - **FAIL**: a checker found a problem: lost or unexpected writes, an anomaly,
   or a recovery that left nodes down (`:recovery` in `results.edn`).
 - **UNKNOWN**: a checker crashed (jepsen exits 2), so nothing was verified.
-- **FATAL**: a node's `volt.log` has a FATAL line, which the lab job also
-  counts as a failure, whatever the checkers said.
+- **FATAL**: a node's `volt.log` has an unexpected FATAL line, which the lab
+  job also counts as a failure, whatever the checkers said. In the torn
+  scenario two kinds are expected and listed but not counted: LazyFS kills
+  itself after the torn write, so VoltDB's next write to the dead mount fails
+  ("Software caused connection abort") and it dies with a FATAL; and the
+  nodes die seconds apart, so one left with fewer than half of its peers
+  shuts down with a partition detection FATAL. A real power loss kills every
+  process first, so it would cause neither.
 - **ERROR**: no results: setup or the harness failed. See `stderr.log`.
 
 To look into a failure, start with `store/results.edn` (which checker, which
