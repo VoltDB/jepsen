@@ -540,4 +540,5 @@ each.
 
 No cell outside `torn` had a FATAL line. Build #19 ran the `torn` cells again
 with the rule (`JEPSEN_EXTRA_ARGS=--scenarios torn`, first seed 407114891):
-6 PASS, with 36-78 expected FATAL lines per cell and no unexpected ones.
+6 PASS; the two cells checked (set, single) had 60 and 72 FATAL lines, all
+expected.
