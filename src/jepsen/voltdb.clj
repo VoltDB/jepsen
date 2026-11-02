@@ -210,6 +210,12 @@
                 (when (:lazyfs test)
                   (lazyfs/log-config! base-dir))
                 (init-db! test node)
+                ; The release-12.3.x and 13.3.x kits ship a log4j.xml whose file
+                ; appender is the relative path log/volt.log. The server JVM
+                ; (cwd base-dir) creates that file, then moves the appender under
+                ; voltdbroot/log and deletes the empty file and, if it is then
+                ; empty, the log/ directory made above. Make it again.
+                (c/exec :mkdir :-p "log")
                 ; this is so jepsen can find the log in a standard place.
                 ; --lazyfs already writes it there.
                 (when-not (:lazyfs test)
